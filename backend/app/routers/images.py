@@ -23,10 +23,25 @@ from ..services.usage import log_usage
 router = APIRouter(prefix="/api/images", tags=["images"])
 
 MAX_REFERENCE_IMAGES = 4
+# 局部编辑的遮罩：白色/不透明区域 = 需要重绘的部分（与上游 /v1/images/edits 的 mask 口径一致）
+MASK_FIELD = "mask"
 
 
 def _file_out(row) -> dict:
     return {"id": row.id, "url": f"/api/files/{row.id}/download", "mime": row.mime, "size": row.size}
+
+
+async def _read_image_part(upload: UploadFile, *, label: str, max_bytes: int) -> tuple[str, bytes, str]:
+    """校验并读取一个图片分片（参考图 / 遮罩共用）。"""
+    mime = (upload.content_type or "").lower()
+    if not mime.startswith("image/"):
+        raise HTTPException(status_code=400, detail=f"仅支持图片文件作为{label}")
+    content = await upload.read()
+    if not content:
+        raise HTTPException(status_code=400, detail=f"{label}为空文件")
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"单张图片不能超过 {settings.max_upload_mb}MB")
+    return (upload.filename or f"{label}.png", content, mime)
 
 
 async def _run_generation(
@@ -146,16 +161,19 @@ async def edit(
     if len(uploads) > MAX_REFERENCE_IMAGES:
         raise HTTPException(status_code=400, detail=f"参考图最多 {MAX_REFERENCE_IMAGES} 张")
 
-    files = []
     max_bytes = settings.max_upload_mb * 1024 * 1024
+    files = []
     for up in uploads:
-        mime = (up.content_type or "").lower()
-        if not mime.startswith("image/"):
-            raise HTTPException(status_code=400, detail="仅支持图片文件作为参考图")
-        content = await up.read()
-        if len(content) > max_bytes:
-            raise HTTPException(status_code=400, detail=f"单张图片不能超过 {settings.max_upload_mb}MB")
-        files.append(("image", (up.filename or "reference.png", content, mime)))
+        files.append(("image", await _read_image_part(up, label="参考图", max_bytes=max_bytes)))
+
+    # 局部编辑：可选遮罩（不透明区域 = 需要重绘的范围），按上游 mask 字段原样透传。
+    # 上游 /v1/images/edits 的字段白名单为 {image, image[], images, images[], image_url,
+    # image_url[]} + {mask, mask[]}，这里用最简的 image / mask。
+    masks = [v for v in form.getlist(MASK_FIELD) if isinstance(v, UploadFile)]
+    if len(masks) > 1:
+        raise HTTPException(status_code=400, detail="遮罩只能上传一张")
+    if masks:
+        files.append((MASK_FIELD, await _read_image_part(masks[0], label="遮罩", max_bytes=max_bytes)))
 
     saved = await _run_generation(
         request=request,

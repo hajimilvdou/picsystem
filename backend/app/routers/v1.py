@@ -367,6 +367,18 @@ async def image_edits(
         if len(content) > max_bytes:
             raise _openai_error(f"单张图片不能超过 {settings.max_upload_mb}MB", 400)
         files.append(("image", (up.filename or "image.png", content, up.content_type or "image/png")))
+
+    # 局部编辑：可选 mask（不透明区域 = 需要重绘的范围），原样透传给上游
+    masks = [v for v in form_data.getlist("mask") if hasattr(v, "read")]
+    if len(masks) > 1:
+        raise _openai_error("mask 只能上传一张", 400)
+    for up in masks:
+        content = await up.read()
+        if not content:
+            raise _openai_error("mask 为空文件", 400)
+        if len(content) > max_bytes:
+            raise _openai_error(f"mask 不能超过 {settings.max_upload_mb}MB", 400)
+        files.append(("mask", (up.filename or "mask.png", content, up.content_type or "image/png")))
     try:
         n = int(form_data.get("n") or 1)
     except ValueError:

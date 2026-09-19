@@ -176,6 +176,51 @@ async def main() -> None:
         assert r.status_code == 403 and "关闭" in r.json()["detail"], r.text
         print("✓ 功能开关生效（绘图已关闭）")
 
+        # 局部编辑遮罩（mask）：上传校验发生在功能开关之前，所以这里可以直接验证；
+        # 合法遮罩会一路走到 require_feature 才被 403 拦下，说明 mask 已被接受
+        r = await client.post(
+            "/api/images/edits",
+            data={"prompt": "把背景换成海边"},
+            files=[
+                ("images", ("ref.png", b"ref", "image/png")),
+                ("mask", ("mask.png", b"mask", "image/png")),
+            ],
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 403 and "关闭" in r.json()["detail"], r.text
+
+        r = await client.post(
+            "/api/images/edits",
+            data={"prompt": "x"},
+            files=[
+                ("images", ("ref.png", b"ref", "image/png")),
+                ("mask", ("m1.png", b"m", "image/png")),
+                ("mask", ("m2.png", b"m", "image/png")),
+            ],
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 400 and "遮罩只能上传一张" in r.json()["detail"], r.text
+
+        r = await client.post(
+            "/api/images/edits",
+            data={"prompt": "x"},
+            files=[
+                ("images", ("ref.png", b"ref", "image/png")),
+                ("mask", ("m.txt", b"m", "text/plain")),
+            ],
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 400 and "遮罩" in r.json()["detail"], r.text
+
+        r = await client.post(
+            "/api/images/edits",
+            data={"prompt": "x"},
+            files=[("mask", ("m.png", b"m", "image/png"))],
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 400 and "参考图" in r.json()["detail"], r.text
+        print("✓ 局部编辑遮罩：单张放行 + 多张/非图片/缺参考图被拦截")
+
         # 注册开关：匿名公开配置同步，关闭后注册被拒
         r = await client.get("/api/auth/public-config")
         assert r.status_code == 200 and r.json()["registration_enabled"] is True, r.text

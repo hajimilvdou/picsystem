@@ -13,7 +13,7 @@ PicSystem 只使用上游以下接口（除 `/files/*` 外均带 `Authorization:
 | `POST /v1/chat/completions` | 对话（SSE 流式 / 非流式） |
 | `POST /v1/search` `{prompt}` | 联网搜索 |
 | `POST /v1/images/generations` | 文生图（请求 `response_format=b64_json`） |
-| `POST /v1/images/edits`（multipart，字段 `image`） | 图生图 |
+| `POST /v1/images/edits`（multipart，字段 `image`，可选 `mask`） | 图生图 / 局部编辑（遮罩重绘） |
 | `POST /v1/ppt/generations`、`POST /v1/psd/generations` | 创建 PPT/PSD 任务 |
 | `GET /v1/editable-file-tasks?ids=` | 任务状态轮询（`items[].status/result.primary_url`） |
 | `GET /files/{path}` | 下载上游产物（仅在响应返回 URL 形式时） |

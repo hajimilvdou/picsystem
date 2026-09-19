@@ -1,9 +1,12 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
-import { Download, Delete } from '@element-plus/icons-vue'
+import { Download, Delete, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api/client'
 import { fmtSize, fmtTime } from '../utils/format'
+
+const router = useRouter()
 
 const tab = ref('image')
 const items = ref([])
@@ -38,6 +41,11 @@ async function remove(item) {
   load()
 }
 
+/** 把这张图带到绘图页做图生图 / 局部编辑（绘图页读取 ?edit=<fileId> 后自动带入）。 */
+function editInDraw(item) {
+  router.push({ path: '/draw', query: { edit: String(item.id) } })
+}
+
 onMounted(load)
 </script>
 
@@ -58,6 +66,7 @@ onMounted(load)
             <div class="file-meta">
               <div class="text-muted" style="font-size: 12px">{{ fmtSize(f.size) }} · {{ fmtTime(f.created_at) }}</div>
               <div>
+                <el-icon style="cursor: pointer; margin-right: 10px" title="去绘图编辑" @click="editInDraw(f)"><EditPen /></el-icon>
                 <a :href="f.url" download style="margin-right: 10px"><el-icon><Download /></el-icon></a>
                 <el-icon style="cursor: pointer" @click="remove(f)"><Delete /></el-icon>
               </div>

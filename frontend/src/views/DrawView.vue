@@ -1,12 +1,16 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Delete, Plus } from '@element-plus/icons-vue'
+import { Download, Delete, Plus, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api/client'
+import MaskEditor from '../components/MaskEditor.vue'
 import { useAuthStore } from '../stores/auth'
 import { fmtSize, fmtTime } from '../utils/format'
 
 const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const tab = ref('gen')
 const form = ref({ prompt: '', model: 'gpt-image-2', n: 1, size: 'auto', quality: 'auto' })
 const imageModels = ref(['gpt-image-2'])
@@ -15,6 +19,18 @@ const qualityOptions = ['auto', 'high', 'medium', 'low']
 const refFiles = ref([])
 const generating = ref(false)
 const results = ref([])
+
+// 局部编辑（遮罩重绘）：仅单张参考图时有明确语义，多图时禁用
+const inpaint = ref(false)
+const maskEditorRef = ref(null)
+const refPreviewUrl = ref('')
+const inpaintAvailable = computed(() => refFiles.value.length === 1)
+
+watch(refFiles, (files) => {
+  if (refPreviewUrl.value) URL.revokeObjectURL(refPreviewUrl.value)
+  refPreviewUrl.value = files.length === 1 ? URL.createObjectURL(files[0]) : ''
+  if (!inpaintAvailable.value) inpaint.value = false
+}, { deep: true })
 
 const history = ref([])
 const historyTotal = ref(0)
@@ -86,6 +102,12 @@ async function generate() {
       if (form.value.size !== 'auto') fd.append('size', form.value.size)
       fd.append('quality', form.value.quality)
       for (const f of refFiles.value) fd.append('images', f)
+      // 局部编辑：把涂抹出来的遮罩作为 mask 字段透传给上游
+      if (inpaint.value) {
+        const maskFile = await maskEditorRef.value?.getMaskFile()
+        if (maskFile) fd.append('mask', maskFile, 'mask.png')
+        else ElMessage.info('未涂抹遮罩，本次按整图编辑处理')
+      }
       data = await api.postForm('/api/images/edits', fd)
     }
     results.value = data.files
@@ -111,9 +133,35 @@ async function removeFile(item, fromResults) {
   loadHistory()
 }
 
-onMounted(() => {
+/** 把站内已生成的图片取回来，作为图生图/局部编辑的参考图。 */
+async function editById(fileId, filename = '') {
+  try {
+    const resp = await fetch(`/api/files/${fileId}/download`, { credentials: 'same-origin' })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const name = filename || `image-${fileId}.${(blob.type || 'image/png').split('/')[1] || 'png'}`
+    refFiles.value = [new File([blob], name, { type: blob.type || 'image/png' })]
+    tab.value = 'edit'
+    results.value = []
+    ElMessage.success('已带入「图生图」，可涂抹局部重绘区域')
+  } catch (e) {
+    ElMessage.error(`带入编辑失败：${e.message}`)
+  }
+}
+
+async function editAgain(item) {
+  await editById(item.id, item.filename)
+}
+
+onMounted(async () => {
   loadModels()
   loadHistory()
+  // 图库「去绘图编辑」跳转过来时带 fileId，带入后清掉 query 避免刷新重复带入
+  const editId = Number(route.query.edit)
+  if (editId) {
+    await editById(editId)
+    router.replace({ query: {} })
+  }
 })
 </script>
 
@@ -155,6 +203,26 @@ onMounted(() => {
                 </div>
               </div>
             </el-form-item>
+            <el-form-item v-if="tab === 'edit' && refFiles.length" label="局部编辑（可选）">
+              <div style="width: 100%">
+                <el-switch
+                  v-model="inpaint"
+                  :disabled="!inpaintAvailable"
+                  active-text="只重绘涂抹区域"
+                  inactive-text="整图编辑"
+                />
+                <div v-if="!inpaintAvailable" class="text-muted" style="font-size: 12px; margin-top: 4px">
+                  局部编辑需要恰好 1 张参考图（当前 {{ refFiles.length }} 张），请先移除多余的参考图
+                </div>
+                <MaskEditor
+                  v-if="inpaint && inpaintAvailable"
+                  ref="maskEditorRef"
+                  :image-url="refPreviewUrl"
+                  :disabled="generating"
+                  style="margin-top: 10px"
+                />
+              </div>
+            </el-form-item>
             <el-form-item label="模型">
               <el-select v-model="form.model" style="width: 100%">
                 <el-option v-for="m in imageModels" :key="m" :label="m" :value="m" />
@@ -194,6 +262,7 @@ onMounted(() => {
             <div v-for="f in results" :key="f.id" class="img-cell">
               <el-image :src="f.url" fit="cover" class="img-thumb" :preview-src-list="[f.url]" preview-teleported />
               <div class="img-actions">
+                <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>
                 <a :href="f.url" download><el-icon title="下载"><Download /></el-icon></a>
                 <el-icon title="删除" @click="removeFile(f, true)"><Delete /></el-icon>
               </div>
@@ -209,6 +278,7 @@ onMounted(() => {
               <el-image :src="f.url" fit="cover" class="img-thumb" :preview-src-list="[f.url]" preview-teleported />
               <el-tooltip :content="`${f.prompt || '无提示词'} · ${fmtSize(f.size)} · ${fmtTime(f.created_at)}`">
                 <div class="img-actions">
+                  <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>
                   <a :href="f.url" download><el-icon><Download /></el-icon></a>
                   <el-icon @click="removeFile(f, false)"><Delete /></el-icon>
                 </div>
