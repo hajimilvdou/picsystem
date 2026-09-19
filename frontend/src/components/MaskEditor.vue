@@ -164,7 +164,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="mask-editor">
     <div class="mask-editor__hint text-muted">
-      在图上涂抹需要重绘的区域（白色笔迹）。未涂抹处保持原样；不涂 = 整图编辑。
+      在图上涂抹需要重绘的区域（白色笔迹），未涂抹处保持原样。
     </div>
     <div ref="wrapRef" class="mask-editor__stage">
       <img v-if="imageUrl" :src="imageUrl" alt="参考图" class="mask-editor__image" />
@@ -178,7 +178,7 @@ onBeforeUnmount(() => {
         @pointerleave="onPointerUp"
         @pointercancel="onPointerUp"
       />
-      <div v-if="!imageUrl" class="mask-editor__empty text-muted">先选择参考图，再涂抹重绘区域</div>
+      <div v-if="!imageUrl" class="mask-editor__empty text-muted">先选择图片，再在上方涂抹重绘区域</div>
     </div>
     <div v-if="loadError" class="mask-editor__error">{{ loadError }}</div>
     <div class="mask-editor__tools">

@@ -2,8 +2,9 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, Delete, Plus, EditPen } from '@element-plus/icons-vue'
+import { Download, Delete, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api/client'
+import ImagePicker from '../components/ImagePicker.vue'
 import MaskEditor from '../components/MaskEditor.vue'
 import { useAuthStore } from '../stores/auth'
 import { fmtSize, fmtTime } from '../utils/format'
@@ -18,21 +19,24 @@ const form = ref({ prompt: '', model: 'gpt-image-2', n: 1, size: 'auto', quality
 const imageModels = ref(['gpt-image-2'])
 const sizeOptions = ['auto', '1024x1024', '1536x1024', '1024x1536']
 const qualityOptions = ['auto', 'high', 'medium', 'low']
+// 图生图：1 张 = 单图生图（整图编辑），2-4 张 = 多图参考
 const refFiles = ref([])
+// 图片编辑：只做单图局部重绘，固定 1 张
+const inpaintFiles = ref([])
 const generating = ref(false)
 const results = ref([])
 
-// 局部编辑（遮罩重绘）：仅单张参考图时有明确语义，多图时禁用
-const inpaint = ref(false)
 const maskEditorRef = ref(null)
-const refPreviewUrl = ref('')
-const inpaintAvailable = computed(() => refFiles.value.length === 1)
+const inpaintPreviewUrl = ref('')
 
-watch(refFiles, (files) => {
-  if (refPreviewUrl.value) URL.revokeObjectURL(refPreviewUrl.value)
-  refPreviewUrl.value = files.length === 1 ? URL.createObjectURL(files[0]) : ''
-  if (!inpaintAvailable.value) inpaint.value = false
-}, { deep: true })
+watch(inpaintFiles, (files) => {
+  if (inpaintPreviewUrl.value) URL.revokeObjectURL(inpaintPreviewUrl.value)
+  inpaintPreviewUrl.value = files.length ? URL.createObjectURL(files[0]) : ''
+})
+
+const editModeHint = computed(() =>
+  refFiles.value.length > 1 ? '多图参考：融合多张图的内容' : '单图生图：按指令重绘整张图（与整图编辑等价）',
+)
 
 const history = ref([])
 const historyTotal = ref(0)
@@ -62,22 +66,6 @@ async function loadHistory() {
   }
 }
 
-function addRefFiles(e) {
-  const files = Array.from(e.target.files || [])
-  e.target.value = ''
-  for (const f of files) {
-    if (refFiles.value.length >= 4) {
-      ElMessage.warning('参考图最多 4 张')
-      break
-    }
-    if (!f.type.startsWith('image/')) {
-      ElMessage.warning('仅支持图片文件')
-      continue
-    }
-    refFiles.value.push(f)
-  }
-}
-
 async function generate() {
   if (!form.value.prompt.trim()) {
     ElMessage.warning('请输入提示词')
@@ -91,25 +79,34 @@ async function generate() {
         ...form.value,
         size: form.value.size === 'auto' ? null : form.value.size,
       })
-    } else {
+    } else if (tab.value === 'edit') {
       if (!refFiles.value.length) {
-        ElMessage.warning('请上传至少一张参考图')
+        ElMessage.warning('请先添加参考图')
         generating.value = false
         return
       }
       const fd = new FormData()
-      fd.append('prompt', form.value.prompt)
-      fd.append('model', form.value.model)
-      fd.append('n', String(form.value.n))
-      if (form.value.size !== 'auto') fd.append('size', form.value.size)
-      fd.append('quality', form.value.quality)
+      appendCommonFields(fd)
       for (const f of refFiles.value) fd.append('images', f)
-      // 局部编辑：把涂抹出来的遮罩作为 mask 字段透传给上游
-      if (inpaint.value) {
-        const maskFile = await maskEditorRef.value?.getMaskFile()
-        if (maskFile) fd.append('mask', maskFile, 'mask.png')
-        else ElMessage.info('未涂抹遮罩，本次按整图编辑处理')
+      data = await api.postForm('/api/images/edits', fd)
+    } else {
+      // 图片编辑 = 局部重绘：必须恰好 1 张图 + 涂抹遮罩，
+      // 否则就退化成「整图编辑」，那属于图生图页的职责（避免两页功能重叠）
+      if (inpaintFiles.value.length !== 1) {
+        ElMessage.warning('图片编辑需要先选择 1 张图片')
+        generating.value = false
+        return
       }
+      const maskFile = await maskEditorRef.value?.getMaskFile()
+      if (!maskFile) {
+        ElMessage.warning('请先在图上涂抹需要重绘的区域；若想整图重绘，请用「图生图」')
+        generating.value = false
+        return
+      }
+      const fd = new FormData()
+      appendCommonFields(fd)
+      fd.append('images', inpaintFiles.value[0])
+      fd.append('mask', maskFile, 'mask.png')
       data = await api.postForm('/api/images/edits', fd)
     }
     results.value = data.files
@@ -122,6 +119,14 @@ async function generate() {
   } finally {
     generating.value = false
   }
+}
+
+function appendCommonFields(fd) {
+  fd.append('prompt', form.value.prompt)
+  fd.append('model', form.value.model)
+  fd.append('n', String(form.value.n))
+  if (form.value.size !== 'auto') fd.append('size', form.value.size)
+  fd.append('quality', form.value.quality)
 }
 
 async function removeFile(item, fromResults) {
@@ -142,10 +147,13 @@ async function editById(fileId, filename = '') {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const blob = await resp.blob()
     const name = filename || `image-${fileId}.${(blob.type || 'image/png').split('/')[1] || 'png'}`
-    refFiles.value = [new File([blob], name, { type: blob.type || 'image/png' })]
+    const file = new File([blob], name, { type: blob.type || 'image/png' })
+    // 两个页面都预置好这张图：切到「图片编辑」就能直接涂抹，不用重新选图
+    refFiles.value = [file]
+    inpaintFiles.value = [file]
     tab.value = 'edit'
     results.value = []
-    ElMessage.success('已带入「图生图」，可涂抹局部重绘区域')
+    ElMessage.success('已带入绘图页；要局部重绘请切到「图片编辑」')
   } catch (e) {
     ElMessage.error(`带入编辑失败：${e.message}`)
   }
@@ -176,6 +184,7 @@ onMounted(async () => {
           <el-tabs v-model="tab">
             <el-tab-pane label="文生图" name="gen" />
             <el-tab-pane label="图生图" name="edit" />
+            <el-tab-pane label="图片编辑" name="inpaint" />
           </el-tabs>
           <el-form label-position="top">
             <el-form-item label="提示词">
@@ -188,42 +197,32 @@ onMounted(async () => {
                 placeholder="描述你想要的画面，例如：一只漂浮在太空里的猫，电影感光影"
               />
             </el-form-item>
-            <el-form-item v-if="tab === 'edit'" label="参考图（最多 4 张）">
-              <div>
-                <el-button :icon="Plus" @click="$refs.fileInput.click()">添加图片</el-button>
-                <input ref="fileInput" type="file" accept="image/*" multiple hidden @change="addRefFiles" />
-                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px">
-                  <div v-for="(f, i) in refFiles" :key="i" style="position: relative">
-                    <img :src="URL.createObjectURL(f)" style="width: 64px; height: 64px; object-fit: cover; border-radius: 6px" />
-                    <el-icon
-                      style="position: absolute; top: -6px; right: -6px; background: #fff; border-radius: 50%; cursor: pointer"
-                      @click="refFiles.splice(i, 1)"
-                    >
-                      <Delete />
-                    </el-icon>
-                  </div>
+            <el-form-item v-if="tab === 'edit'" label="参考图（1-4 张）">
+              <div style="width: 100%">
+                <ImagePicker v-model="refFiles" :max="4" :disabled="generating" />
+                <div class="text-muted" style="font-size: 12px; margin-top: 6px">{{ editModeHint }}</div>
+              </div>
+            </el-form-item>
+            <el-form-item v-if="tab === 'inpaint'" label="原图（1 张）">
+              <div style="width: 100%">
+                <ImagePicker
+                  v-model="inpaintFiles"
+                  :max="1"
+                  :thumb-size="88"
+                  button-text="选择图片"
+                  :disabled="generating"
+                />
+                <div class="text-muted" style="font-size: 12px; margin-top: 6px">
+                  局部重绘：下方涂抹要修改的区域，只有涂抹处会被重绘
                 </div>
               </div>
             </el-form-item>
-            <el-form-item v-if="tab === 'edit' && refFiles.length" label="局部编辑（可选）">
-              <div style="width: 100%">
-                <el-switch
-                  v-model="inpaint"
-                  :disabled="!inpaintAvailable"
-                  active-text="只重绘涂抹区域"
-                  inactive-text="整图编辑"
-                />
-                <div v-if="!inpaintAvailable" class="text-muted" style="font-size: 12px; margin-top: 4px">
-                  局部编辑需要恰好 1 张参考图（当前 {{ refFiles.length }} 张），请先移除多余的参考图
-                </div>
-                <MaskEditor
-                  v-if="inpaint && inpaintAvailable"
-                  ref="maskEditorRef"
-                  :image-url="refPreviewUrl"
-                  :disabled="generating"
-                  style="margin-top: 10px"
-                />
-              </div>
+            <el-form-item v-if="tab === 'inpaint'" label="涂抹重绘区域">
+              <MaskEditor
+                ref="maskEditorRef"
+                :image-url="inpaintPreviewUrl"
+                :disabled="generating || !inpaintFiles.length"
+              />
             </el-form-item>
             <el-form-item label="模型">
               <el-select v-model="form.model" style="width: 100%">
@@ -250,7 +249,7 @@ onMounted(async () => {
               </el-col>
             </el-row>
             <el-button type="primary" style="width: 100%" :loading="generating" @click="generate">
-              {{ generating ? '生成中（可能需要 1-2 分钟）…' : '开始生成' }}
+              {{ generating ? '生成中（可能需要 1-2 分钟）…' : (tab === 'inpaint' ? '重绘涂抹区域' : '开始生成') }}
             </el-button>
             <div class="text-muted" style="margin-top: 8px">绘图剩余次数：{{ auth.quotaText('image') }}</div>
           </el-form>
@@ -272,7 +271,7 @@ onMounted(async () => {
                 @error="onImageError(f)"
               />
               <div class="img-actions">
-                <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>
+                <el-icon title="带到绘图页编辑" @click="editAgain(f)"><EditPen /></el-icon>
                 <a :href="f.url" download><el-icon title="下载"><Download /></el-icon></a>
                 <el-icon title="删除" @click="removeFile(f, true)"><Delete /></el-icon>
               </div>
@@ -296,7 +295,7 @@ onMounted(async () => {
               />
               <el-tooltip :content="`${f.prompt || '无提示词'} · ${fmtSize(f.size)} · ${fmtTime(f.created_at)}`">
                 <div class="img-actions">
-                  <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>
+                  <el-icon title="带到绘图页编辑" @click="editAgain(f)"><EditPen /></el-icon>
                   <a :href="f.url" download><el-icon><Download /></el-icon></a>
                   <el-icon @click="removeFile(f, false)"><Delete /></el-icon>
                 </div>
