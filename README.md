@@ -134,11 +134,57 @@ docker compose down           # 停止（数据保留在卷中）
 docker compose pull && docker compose up -d --build   # 更新
 ```
 
-数据库与文件数据分别在 `db-data`、`app-data` 命名卷；内置 2api 数据在 `./data/chatgpt2api` 与 `chatgpt2api-runtime` 卷。备份这些卷/目录即可完整备份。
+## 版本更新与数据保留
+
+更新步骤（已有部署升级到新版本）：
+
+```bash
+cd picsystem
+cp .env .env.backup        # 建议先备份配置
+git pull
+bash deploy.sh             # 提示「直接复用并启动？」时直接回车
+```
+
+数据库表结构升级（迁移）**在 api 容器启动时自动完成**，无需手写 SQL、无需清库。
+部署脚本在健康检查通过后会打印一次迁移结果，也可以随时查看：
+
+```bash
+docker compose exec api python -m app.migrate status
+```
+
+> ⚠️ **不要**在「检测到已有 .env 配置，直接复用并启动？」时选 `n`。选 `n` 会重新生成一份新配置，
+> 导致 `POSTGRES_PASSWORD` 与已初始化的数据库不匹配（服务起不来）、`JWT_SECRET` 变化（全部会话失效）、
+> `ADMIN_PASSWORD` 变化（旧管理员密码作废）。旧配置会被备份为 `.env.bak.<时间戳>`，可以救回来但会中断服务。
+> 非交互场景用 `bash deploy.sh --yes`（等价于全部选默认，即复用）。
+
+**数据放在哪里**（只要不执行下表的危险操作，升级都不会丢数据）：
+
+| 位置 | 内容 | 什么操作会清空它 |
+| :--- | :--- | :--- |
+| 卷 `db-data` | 用户、额度、邀请码、兑换码、日志、产物索引 | `docker compose down -v`、`docker volume rm` |
+| 卷 `app-data` | 用户产物实物（图片 / PPT / PSD） | 同上 |
+| 卷 `chatgpt2api-runtime`、目录 `./data/chatgpt2api` | 上游账号池与设置 | 同上（目录需手动删） |
+| `.env` | 全部密钥与管理员密码 | 重新部署时选 `n`（会先备份） |
+
+`docker compose up -d --build`、`restart`、`pull`、`down`（**不带 `-v`**）都不会动这些卷；
+`.env` 与 `data/` 均在 `.gitignore` 内，`git pull` 不会覆盖。
 
 > `db-data` 挂载到容器的 `/var/lib/postgresql`（而非 17 及以前的 `/var/lib/postgresql/data`）：
 > postgres 18 起 `PGDATA` 改为 `/var/lib/postgresql/<主版本>/docker`，官方镜像的挂载点也上移到了父目录，
 > 继续挂载旧路径会被入口脚本判定为遗留挂载点并拒绝启动。
+
+**升级前建议备份**（数据库用户名以 `.env` 的 `POSTGRES_USER` 为准，默认 `picsystem`）：
+
+```bash
+cp .env .env.backup
+docker compose exec -T db pg_dump -U picsystem picsystem > backup-$(date +%F).sql
+docker run --rm -v picsystem_app-data:/data -v "$PWD":/backup alpine tar czf /backup/app-data.tgz /data
+```
+
+迁移框架的开发者约定（如何新增迁移、双方言差异、失败处理）见 [docs/MIGRATIONS.md](./docs/MIGRATIONS.md)。
+
+> 上游镜像默认是 `latest`，而「上游账号」页依赖上游的内部管理 API，生产环境建议在 `.env` 固定版本：
+> `CHATGPT2API_IMAGE=ghcr.io/yukkcat/chatgpt2api:v3.2.3`
 
 ## 域名反代（HTTPS）
 
@@ -242,6 +288,8 @@ python smoke_test.py
 | `POSTGRES_*` | — | 内联 PostgreSQL，不暴露端口 |
 | `COOKIE_SECURE` | `false` | HTTPS 反代时置 `true` |
 | `CHATGPT2API_CONSOLE_PORT` | `3000` | 内置 2api 控制台（仅 127.0.0.1） |
+| `MIGRATIONS_LOCK_TIMEOUT_SECONDS` | `120` | 等待数据库迁移锁的上限（仅多实例部署时相关） |
+| `MIGRATIONS_SKIP_DESTRUCTIVE` | 未设置 | 设为 `true` 时跳过标记破坏性的迁移 |
 
 ## 项目结构
 
@@ -251,9 +299,12 @@ python smoke_test.py
 ├── docker-compose.console.yml# 可选叠加：暴露内置上游控制台到本机回环
 ├── docs/UPSTREAM.md          # 上游升级 / 验证 / 回滚指南
 ├── docs/UPSTREAM-ADMIN-API.md# 上游账号管理 API 适配预案（路线 C）
+├── docs/MIGRATIONS.md        # 数据库迁移：如何新增一条迁移与双方言约定
 ├── backend/                  # FastAPI 后端
 │   ├── app/routers/          # auth、chat、search、images、ppt、files、keys、admin_*、v1
-│   └── app/services/         # 上游代理、额度、存储、清理、统计、任务同步、风控、会话
+│   ├── app/services/         # 上游代理、额度、存储、清理、统计、任务同步、风控、会话
+│   ├── app/migrations/       # 版本化迁移框架（启动自动执行）+ versions/ 迁移脚本
+│   └── app/migrate.py        # 迁移 CLI：status / up / --dry-run / --target
 └── frontend/                 # Vue 3 + Element Plus 前端
     ├── src/views/            # 用户端页面
     └── src/views/admin/      # 管理端页面

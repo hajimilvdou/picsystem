@@ -6,6 +6,7 @@
 import asyncio
 import os
 import shutil
+from pathlib import Path
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data-smoke/smoke.db"
 os.environ["DATA_DIR"] = "./data-smoke"
@@ -846,6 +847,146 @@ async def main() -> None:
         no_close = ":::writing{x}\n保留我"
         assert strip_writing_markers(no_close) == "保留我", strip_writing_markers(no_close)
         print("✓ 上游 :::writing 标记过滤（整段/切块/误伤/未闭合）")
+
+    # ---- 数据库迁移框架：历史库一键升级 / 幂等 / 篡改检测 / 全新库空跑 ----
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.migrations import load_migrations, migration_status, run_migrations
+
+    migrations = load_migrations()
+    assert migrations, "未发现任何迁移脚本"
+
+    # 造一个「启用迁移框架之前」的老库：先把表建成当前模型结构，
+    # 再删掉「由迁移负责补齐」的列（等价于老版本的表结构），
+    # 并把 redemptions 换回旧结构。夹具自动跟随模型演进，不会写死。
+    migration_managed_columns = {
+        "users": [
+            "storage_limit_mb", "reg_fp", "reg_ip", "agreement_version",
+            "notice_version", "reg_note", "last_checkin_key", "max_inflight", "note",
+        ],
+        "user_quotas": ["temp_amount", "temp_expires_at"],
+        "invite_codes": ["pool_type", "valid_days", "valid_hours", "fixed_expires_at"],
+        "redemption_codes": ["fixed_expires_at"],
+    }
+    legacy_path = Path("./data-smoke/legacy.db")
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.unlink(missing_ok=True)
+    legacy_engine = create_async_engine("sqlite+aiosqlite:///./data-smoke/legacy.db")
+    from app.database import Base as AppBase
+
+    async with legacy_engine.begin() as conn:
+        await conn.run_sync(AppBase.metadata.create_all)
+        await conn.execute(sa_text("DROP INDEX IF EXISTS ix_users_reg_fp"))
+        for table, columns in migration_managed_columns.items():
+            for column in columns:
+                await conn.execute(sa_text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+        await conn.execute(sa_text("DROP TABLE redemptions"))
+        await conn.execute(
+            sa_text("CREATE TABLE redemptions (id INTEGER PRIMARY KEY, invite_code_id INTEGER, user_id INTEGER)")
+        )
+        # 老库里放一条历史用户：NOT NULL 且无默认值的列用占位值填满，
+        # 这样夹具不会因为模型新增非空列而失效
+        user_columns = await conn.run_sync(lambda c: sa_inspect(c).get_columns("users"))
+        row: dict[str, object] = {}
+        for column in user_columns:
+            name, default = column["name"], column["default"]
+            if name == "id":
+                row[name] = 1
+            elif name == "username":
+                row[name] = "legacy_user"
+            elif name == "password_hash":
+                row[name] = "h"
+            elif column["nullable"] or default is not None:
+                continue
+            elif "INT" in str(column["type"]).upper():
+                row[name] = 0
+            else:
+                row[name] = ""
+        await conn.execute(
+            sa_text(
+                f"INSERT INTO users ({', '.join(row)}) VALUES ({', '.join(f':{k}' for k in row)})"
+            ),
+            row,
+        )
+        await conn.execute(sa_text("INSERT INTO redemptions (id, invite_code_id, user_id) VALUES (1, 7, 1)"))
+
+    legacy_report = await run_migrations(legacy_engine)
+    assert legacy_report.applied, legacy_report.summary()
+    assert any(item.changed for item in legacy_report.applied), legacy_report.summary()
+
+    async with legacy_engine.connect() as conn:
+        tables = await conn.run_sync(lambda c: set(sa_inspect(c).get_table_names()))
+        user_cols = await conn.run_sync(lambda c: {x["name"] for x in sa_inspect(c).get_columns("users")})
+        user_indexes = await conn.run_sync(lambda c: {x["name"] for x in sa_inspect(c).get_indexes("users")})
+        new_cols = await conn.run_sync(
+            lambda c: {x["name"] for x in sa_inspect(c).get_columns("redemptions")}
+        )
+        kept_user = (await conn.execute(sa_text("SELECT username FROM users WHERE id = 1"))).scalar()
+        kept_redeem = (
+            await conn.execute(sa_text("SELECT invite_code_id FROM redemptions_legacy WHERE id = 1"))
+        ).scalar()
+    assert {"note", "reg_fp", "max_inflight", "storage_limit_mb"} <= user_cols, user_cols
+    assert "ix_users_reg_fp" in user_indexes, user_indexes
+    assert "redemptions_legacy" in tables and "redemption_code_id" in new_cols, (tables, new_cols)
+    assert kept_user == "legacy_user" and kept_redeem == 7, (kept_user, kept_redeem)
+    print("✓ 迁移：历史库自动升级（补列 / 建索引 / 重建表）且数据保留")
+
+    assert (await run_migrations(legacy_engine)).applied == []
+    print("✓ 迁移：重复执行幂等，不会重复改结构")
+
+    async with legacy_engine.begin() as conn:
+        await conn.execute(sa_text("UPDATE schema_migrations SET checksum = 'tampered' WHERE id = '0001'"))
+    states = {row.id: row.state for row in await migration_status(legacy_engine)}
+    assert states.get("0001") == "edited", states
+    print("✓ 迁移：能发现已应用迁移被事后修改")
+
+    fresh_path = Path("./data-smoke/fresh.db")
+    fresh_path.unlink(missing_ok=True)
+    fresh_engine = create_async_engine("sqlite+aiosqlite:///./data-smoke/fresh.db")
+    fresh_report = await run_migrations(fresh_engine)
+    assert all(item.changed == 0 for item in fresh_report.applied), fresh_report.summary()
+    async with fresh_engine.connect() as conn:
+        fresh_tables = await conn.run_sync(lambda c: set(sa_inspect(c).get_table_names()))
+    assert fresh_tables == {"schema_migrations"}, fresh_tables
+    await fresh_engine.dispose()
+    print("✓ 迁移：全新库空跑，表结构交给 create_all")
+
+    from app.database import SessionLocal as MigrationSession
+
+    async with MigrationSession() as session:
+        recorded = (await session.execute(sa_text("SELECT COUNT(*) FROM schema_migrations"))).scalar()
+    assert recorded == len(migrations), (recorded, len(migrations))
+    await init_db()  # 模拟容器重启：迁移不得重复执行
+    async with MigrationSession() as session:
+        recorded_again = (await session.execute(sa_text("SELECT COUNT(*) FROM schema_migrations"))).scalar()
+    assert recorded_again == len(migrations), recorded_again
+
+    # 关键不变量：历史库迁移后的列集合必须与全新库（create_all 建的）一致。
+    # 相差即说明「迁移加了列但模型漏加」（新装缺列）或「模型加了列但没写迁移」（老库缺列）。
+    from app.database import engine as app_engine
+
+    compared_tables = ("users", "user_quotas", "invite_codes", "redemptions")
+    fresh_columns: dict[str, set] = {}
+    async with app_engine.connect() as conn:
+        for table in compared_tables:
+            fresh_columns[table] = await conn.run_sync(
+                lambda c, t=table: {x["name"] for x in sa_inspect(c).get_columns(t)}
+            )
+    async with legacy_engine.connect() as conn:
+        for table in compared_tables:
+            legacy_columns = await conn.run_sync(
+                lambda c, t=table: {x["name"] for x in sa_inspect(c).get_columns(t)}
+            )
+            assert fresh_columns[table] == legacy_columns, (
+                table,
+                fresh_columns[table] ^ legacy_columns,
+            )
+    print("✓ 迁移：历史库迁移后结构 == 全新库结构（模型与迁移无漂移）")
+
+    await legacy_engine.dispose()
+    print(f"✓ 迁移：启动自动执行且二次启动不重复（共 {len(migrations)} 条）")
 
     from app.database import engine
     await engine.dispose()  # 释放连接，保证 Windows 下能删除数据目录

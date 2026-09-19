@@ -44,6 +44,9 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       SITE_NAME: ${SITE_NAME:-PicSystem}
       DATA_DIR: /data
+      # 数据库迁移（可选，一般无需修改，详见 docs/MIGRATIONS.md）
+      MIGRATIONS_LOCK_TIMEOUT_SECONDS: ${MIGRATIONS_LOCK_TIMEOUT_SECONDS:-120}
+      MIGRATIONS_SKIP_DESTRUCTIVE: ${MIGRATIONS_SKIP_DESTRUCTIVE:-false}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - app-data:/data

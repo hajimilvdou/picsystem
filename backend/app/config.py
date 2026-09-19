@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     upstream_connect_timeout: float = 10.0
     upstream_read_timeout: float = 300.0
 
+    # 数据库迁移（详见 docs/MIGRATIONS.md）
+    # 多实例部署时等待迁移锁的上限（秒）
+    migrations_lock_timeout_seconds: float = 120.0
+    # 置 true 时跳过标记为破坏性的迁移（删表 / 删列），谨慎使用
+    migrations_skip_destructive: bool = False
+
 
 settings = Settings()
 

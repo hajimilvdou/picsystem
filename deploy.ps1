@@ -159,8 +159,17 @@ foreach ($i in 1..60) {
     }
     catch { Start-Sleep -Seconds 2 }
 }
-if ($healthy) { Ok "PicSystem 已启动！" }
-else { Warn "健康检查暂未通过，请用 docker compose logs -f 查看日志" }
+if ($healthy) {
+    Ok "PicSystem 已启动！"
+    # 数据库迁移在 api 启动时自动完成，这里做结果确认：升级是否成功一目了然
+    Info "数据库迁移状态："
+    docker compose exec -T api python -m app.migrate status
+    if ($LASTEXITCODE -ne 0) { Warn "未能读取迁移状态，可用 docker compose logs api 查看「[迁移]」日志" }
+}
+else {
+    Warn "健康检查暂未通过，请用 docker compose logs -f 查看日志"
+    Warn "若日志中出现「迁移」报错，说明数据库升级失败——服务会拒绝启动以免带半截结构对外服务"
+}
 
 Write-Host ""
 Write-Host "============================================"

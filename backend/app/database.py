@@ -1,12 +1,15 @@
 """数据库引擎与会话。"""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from .config import settings
+
+log = logging.getLogger("picsystem.db")
 
 
 class Base(DeclarativeBase):
@@ -48,66 +51,31 @@ async def get_db():
 
 
 async def init_db() -> None:
-    """建表 + 轻量列迁移 + 写入默认设置 + 创建初始管理员。"""
+    """启动时初始化数据库：版本化迁移 → 建表 → 默认设置与初始管理员。
+
+    顺序上先跑迁移再 create_all：
+    - 历史库：迁移只负责把「已存在的表」补到最新结构（幂等，数据不丢）；
+    - 全新库：迁移全部空跑（表还不存在），create_all 一次建出最新结构。
+
+    迁移失败会抛异常中止启动，避免带着半截 schema 对外服务。
+    迁移脚本与约定见 docs/MIGRATIONS.md。
+    """
     from . import models  # noqa: F401  确保模型已注册
+    from .migrations import run_migrations
     from .services.bootstrap import seed_defaults
+
+    report = await run_migrations(engine)
+    if report.applied:
+        log.info("[迁移] %s", report.summary())
+        for item in report.applied:
+            log.info("[迁移] %s %s（%d 处改动，%dms）", item.id, item.description, item.changed, item.duration_ms)
+    for migration_id in report.edited:
+        log.warning("[迁移] %s 在应用后被修改过，其改动不会生效（请新增迁移而不是改旧的）", migration_id)
+    for label in report.skipped_destructive:
+        log.warning("[迁移] %s 为破坏性迁移，已按 MIGRATIONS_SKIP_DESTRUCTIVE 跳过", label)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_lightweight_migrations)
     async with SessionLocal() as session:
         await seed_defaults(session)
         await session.commit()
-
-
-def _lightweight_migrations(sync_conn) -> None:
-    """create_all 不会修改已有表；对新增列做幂等 ADD COLUMN / CREATE INDEX。"""
-    from sqlalchemy import inspect, text
-
-    inspector = inspect(sync_conn)
-
-    def add_col(table: str, name: str, ddl: str) -> bool:
-        cols = {c["name"] for c in inspector.get_columns(table)}
-        if name not in cols:
-            sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
-            return True
-        return False
-
-    if "users" in inspector.get_table_names():
-        add_col("users", "storage_limit_mb", "storage_limit_mb INTEGER")
-        add_col("users", "reg_fp", "reg_fp VARCHAR(128) DEFAULT '' NOT NULL")
-        add_col("users", "reg_ip", "reg_ip VARCHAR(64) DEFAULT '' NOT NULL")
-        add_col("users", "agreement_version", "agreement_version INTEGER DEFAULT 0 NOT NULL")
-        add_col("users", "notice_version", "notice_version INTEGER DEFAULT 0 NOT NULL")
-        add_col("users", "reg_note", "reg_note VARCHAR(300) DEFAULT '' NOT NULL")
-        add_col("users", "last_checkin_key", "last_checkin_key VARCHAR(10) DEFAULT '' NOT NULL")
-        add_col("users", "max_inflight", "max_inflight INTEGER")
-        # 仅在建列当次回填注册备注；之后不再动（避免管理员清空后重启被还原）
-        if add_col("users", "note", "note VARCHAR(500) DEFAULT '' NOT NULL"):
-            sync_conn.execute(text("UPDATE users SET note = reg_note WHERE reg_note != ''"))
-        indexes = {i["name"] for i in inspector.get_indexes("users")}
-        if "ix_users_reg_fp" not in indexes:
-            sync_conn.execute(text("CREATE INDEX ix_users_reg_fp ON users (reg_fp)"))
-
-    if "user_quotas" in inspector.get_table_names():
-        add_col("user_quotas", "temp_amount", "temp_amount INTEGER DEFAULT 0 NOT NULL")
-        add_col("user_quotas", "temp_expires_at", "temp_expires_at TIMESTAMP")  # PG 无 DATETIME 类型
-
-    if "invite_codes" in inspector.get_table_names():
-        add_col("invite_codes", "pool_type", "pool_type VARCHAR(16) DEFAULT 'permanent' NOT NULL")
-        add_col("invite_codes", "valid_days", "valid_days INTEGER DEFAULT 1 NOT NULL")
-        add_col("invite_codes", "valid_hours", "valid_hours INTEGER DEFAULT 0 NOT NULL")
-        add_col("invite_codes", "fixed_expires_at", "fixed_expires_at TIMESTAMP")
-
-    if "redemption_codes" in inspector.get_table_names():
-        add_col("redemption_codes", "fixed_expires_at", "fixed_expires_at TIMESTAMP")
-
-    # redemptions 表结构调整（invite_code_id → redemption_code_id）：
-    # 旧表重命名为 redemptions_legacy 留存，按新结构重建（历史兑换记录可手工迁移）
-    if "redemptions" in inspector.get_table_names():
-        cols = {c["name"] for c in inspector.get_columns("redemptions")}
-        if "redemption_code_id" not in cols and "redemptions_legacy" not in inspector.get_table_names():
-            from . import models
-
-            sync_conn.execute(text("ALTER TABLE redemptions RENAME TO redemptions_legacy"))
-            models.Redemption.__table__.create(bind=sync_conn)
