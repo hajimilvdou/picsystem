@@ -146,22 +146,27 @@ function selectedFiles() {
   return items.value.filter((f) => selectedIds.value.includes(f.id))
 }
 
-function archivePrecheck() {
+/** 选中项校验。maxBytes 只在打包下载时传——删除不受体积上限约束。 */
+function selectTargets({ maxFiles = ARCHIVE_MAX_FILES, maxBytes = 0 } = {}) {
   const chosen = selectedFiles()
   if (!chosen.length) {
-    ElMessage.warning('请先选择要下载的文件')
+    ElMessage.warning('请先选择文件')
     return null
   }
-  if (chosen.length > ARCHIVE_MAX_FILES) {
-    ElMessage.warning(`单次最多打包 ${ARCHIVE_MAX_FILES} 个文件，当前选中 ${chosen.length} 个`)
+  if (chosen.length > maxFiles) {
+    ElMessage.warning(`单次最多处理 ${maxFiles} 个文件，当前选中 ${chosen.length} 个`)
     return null
   }
   const total = chosen.reduce((sum, f) => sum + (f.size || 0), 0)
-  if (total > ARCHIVE_MAX_BYTES) {
+  if (maxBytes && total > maxBytes) {
     ElMessage.warning(`选中的文件合计 ${(total / 1048576).toFixed(0)}MB，超过 1GB 上限，请分批下载`)
     return null
   }
   return chosen
+}
+
+function archivePrecheck() {
+  return selectTargets({ maxBytes: ARCHIVE_MAX_BYTES })
 }
 
 /** 用原生 <a download> 触发下载：zip 由浏览器直接写盘，不会把整包读进内存。 */
@@ -205,6 +210,7 @@ async function compressSelected() {
     // 1) 干跑预估：不写盘，先把收益算清楚给用户看
     let before = 0
     let after = 0
+    let previewFailed = 0
     const worthwhile = []
     for (const item of chosen) {
       try {
@@ -213,13 +219,16 @@ async function compressSelected() {
         after += preview.after_bytes
         if (preview.worthwhile) worthwhile.push(item)
       } catch {
-        /* 单张预估失败先跳过，正式压缩时再单独报错 */
+        previewFailed += 1
       }
     }
     if (!worthwhile.length) {
-      ElMessage.info('这些图片压缩后不会更小，已跳过（原文件未改动）')
+      // 区分「本来就不值得压」与「预估失败」，否则会给出误导性结论
+      if (previewFailed) ElMessage.error(`全部 ${previewFailed} 张预估失败，请稍后重试`)
+      else ElMessage.info('这些图片压缩后不会更小，已跳过（原文件未改动）')
       return
     }
+    if (previewFailed) ElMessage.warning(`${previewFailed} 张预估失败，本次跳过`);
     const percent = before ? Math.round((1 - after / before) * 100) : 0
     try {
       await ElMessageBox.confirm(
@@ -264,7 +273,7 @@ async function compressSelected() {
 }
 
 async function removeSelected() {
-  const chosen = archivePrecheck()
+  const chosen = selectTargets()  // 删除只看数量，不受打包体积上限约束
   if (!chosen) return
   try {
     await ElMessageBox.confirm(
@@ -387,17 +396,17 @@ onMounted(() => {
                   :type="tagFilter === t ? 'primary' : 'info'"
                   effect="plain"
                   style="cursor: pointer"
-                  @click="pickTag(t)"
+                  @click.stop="pickTag(t)"
                 >
                   {{ t }}
                 </el-tag>
               </div>
               <div class="text-muted" style="font-size: 12px">{{ fmtSize(f.size) }} · {{ fmtTime(f.created_at) }}</div>
               <div>
-                <el-icon style="cursor: pointer; margin-right: 10px" title="设置标签" @click="openTagDialog(f)"><PriceTag /></el-icon>
-                <el-icon style="cursor: pointer; margin-right: 10px" title="去绘图编辑" @click="editInDraw(f)"><EditPen /></el-icon>
-                <a :href="f.url" download style="margin-right: 10px"><el-icon><Download /></el-icon></a>
-                <el-icon style="cursor: pointer" @click="remove(f)"><Delete /></el-icon>
+                <el-icon style="cursor: pointer; margin-right: 10px" title="设置标签" @click.stop="openTagDialog(f)"><PriceTag /></el-icon>
+                <el-icon style="cursor: pointer; margin-right: 10px" title="去绘图编辑" @click.stop="editInDraw(f)"><EditPen /></el-icon>
+                <a :href="f.url" download style="margin-right: 10px" @click.stop><el-icon><Download /></el-icon></a>
+                <el-icon style="cursor: pointer" @click.stop="remove(f)"><Delete /></el-icon>
               </div>
             </div>
           </div>

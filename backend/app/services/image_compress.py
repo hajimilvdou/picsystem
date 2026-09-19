@@ -17,6 +17,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, features
 
+from ..config import MAX_DECODE_PIXELS
+
 log = logging.getLogger("picsystem.image_compress")
 
 COMPRESSIBLE_MIME = {"image/png", "image/jpeg", "image/webp"}
@@ -56,6 +58,11 @@ def compress(source: Path, *, quality: int = DEFAULT_QUALITY, max_edge: int | No
         raise CompressError("原文件不存在")
     try:
         with Image.open(source) as image:
+            width, height = image.size
+            if width * height > MAX_DECODE_PIXELS:
+                raise CompressError(
+                    f"图片分辨率过高（{width}x{height}），超过解码上限，未压缩"
+                )
             image = ImageOps.exif_transpose(image)
             if image.mode in ("RGBA", "LA", "P"):
                 image = image.convert("RGBA")   # 保留透明通道

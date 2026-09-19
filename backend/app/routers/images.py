@@ -37,7 +37,7 @@ def _file_out(row) -> dict:
     return {
         "id": row.id,
         "url": f"/api/files/{row.id}/download",
-        "thumb_url": f"/api/files/{row.id}/thumb",
+        "thumb_url": f"/api/files/{row.id}/thumb?v={row.size}",
         "mime": row.mime,
         "size": row.size,
     }

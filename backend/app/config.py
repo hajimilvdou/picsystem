@@ -6,6 +6,10 @@ import secrets
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 单张图片允许解码的最大像素数（5000 万）。Pillow 默认只对超过 ~8900 万像素告警，
+# 而超大图解码会瞬间吃掉几百 MB 内存——这里改成硬上限，缩略图与压缩共用。
+MAX_DECODE_PIXELS = 50_000_000
+
 # 迁移相关默认值（.env 里写了键但留空时回落到这里，见下面的校验器）
 DEFAULT_MIGRATIONS_LOCK_TIMEOUT = 120.0
 DEFAULT_MIGRATIONS_SKIP_DESTRUCTIVE = False

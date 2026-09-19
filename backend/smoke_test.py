@@ -530,7 +530,9 @@ async def main() -> None:
 
         r = await client.get("/api/files", params={"kind": "image"}, cookies=user_cookies)
         target = next(item for item in r.json()["items"] if item["id"] == big_id)
-        assert target["thumb_url"] == f"/api/files/{big_id}/thumb", target
+        assert target["thumb_url"].startswith(f"/api/files/{big_id}/thumb?v="), target
+        # 缓存键必须跟随文件体积：压缩替换后浏览器才会重新拉缩略图
+        assert target["thumb_url"].split("?v=")[-1] == str(target["size"]), target
 
         # 按需生成并落盘：长边 400、JPEG、保持比例
         thumb_file = thumb_abs_path(big_rel)
@@ -542,6 +544,22 @@ async def main() -> None:
             assert max(im.size) == THUMB_EDGE and im.size == (400, 225), im.size
         # 不能落在 files/ 下，否则会被孤儿文件清理误删
         assert (file_data_root() / "files") not in thumb_file.parents, thumb_file
+
+        # 解码像素上限守卫：把上限调到 10 像素，任何真实图片都应被拒（防解压炸弹）
+        from app.services import thumbnails as thumb_module
+
+        guard_rel = "files/test/guard.png"
+        guard_abs = file_data_root() / guard_rel
+        PILImage.new("RGB", (40, 40), (1, 2, 3)).save(guard_abs)
+        original_limit = thumb_module.MAX_DECODE_PIXELS
+        thumb_module.MAX_DECODE_PIXELS = 10
+        try:
+            assert thumb_module.ensure_thumbnail(guard_abs, guard_rel) is None, "像素守卫未生效"
+            assert not thumb_abs_path(guard_rel).exists()
+        finally:
+            thumb_module.MAX_DECODE_PIXELS = original_limit
+        # 恢复上限后能正常生成
+        assert thumb_module.ensure_thumbnail(guard_abs, guard_rel) is not None
 
         # 越权访问拿不到缩略图
         r = await client.get(f"/api/files/{big_id}/thumb", cookies=cookies)
@@ -599,7 +617,7 @@ async def main() -> None:
             assert bundle.read("shot (2).png") == b"PNG-" + bytes([1]) * 8
 
         # 非法 / 空 / 超量入参
-        for bad in ("abc", "", ",".join(str(i) for i in range(1, 302))):
+        for bad in ("abc", "", "9" * 20, ",".join(str(i) for i in range(1, 302))):
             r = await client.get("/api/files/archive", params={"ids": bad}, cookies=user_cookies)
             assert r.status_code == 400, (bad[:20], r.status_code, r.text)
 
@@ -686,6 +704,25 @@ async def main() -> None:
         assert not thumb_before.exists(), "旧缩略图未随原文件清理"
         r = await client.get(f"/api/files/{noise_id}/download", cookies=user_cookies)
         assert r.status_code == 200 and r.headers["content-type"] == "image/webp", r.text
+
+        # 解码像素上限守卫：上限调到 10 像素后应直接拒绝，且不动原文件
+        from app.services import image_compress as compress_module
+        from app.services.image_compress import CompressError
+
+        guard2_rel = "files/test/guard2.png"
+        guard2_abs = file_data_root() / guard2_rel
+        PILImage.new("RGB", (40, 40), (9, 9, 9)).save(guard2_abs)
+        original_pixels = compress_module.MAX_DECODE_PIXELS
+        compress_module.MAX_DECODE_PIXELS = 10
+        try:
+            try:
+                compress_module.compress(guard2_abs, quality=80)
+                raise AssertionError("压缩的像素守卫未生效")
+            except CompressError:
+                pass
+        finally:
+            compress_module.MAX_DECODE_PIXELS = original_pixels
+        assert guard2_abs.exists()
 
         # 不支持的类型 / 越权 / 参数越界
         for target_id in (gif_id, deck_id):

@@ -50,7 +50,8 @@ TAG_SCAN_LIMIT = 2000
 
 def _file_out(row: StoredFile) -> dict:
     # 图片类才给缩略图地址；取不到时前端回退到原图
-    thumb_url = f"/api/files/{row.id}/thumb" if row.mime in THUMBABLE_MIME else None
+    # v=size 当缓存键：文件被压缩替换后 size 会变，浏览器自然会重新拉缩略图
+    thumb_url = f"/api/files/{row.id}/thumb?v={row.size}" if row.mime in THUMBABLE_MIME else None
     return {
         "id": row.id,
         "kind": row.kind,
@@ -101,8 +102,9 @@ def _parse_ids(raw: str) -> list[int]:
         part = part.strip()
         if not part:
             continue
-        if not part.isdigit():
-            raise HTTPException(status_code=400, detail="ids 只能是以逗号分隔的数字")
+        # 18 位以内：64 位整数最多 19 位，超长数字交给数据库会直接报错（500）
+        if not part.isdigit() or len(part) > 18:
+            raise HTTPException(status_code=400, detail="ids 只能是以逗号分隔的文件编号")
         ids.append(int(part))
     if not ids:
         raise HTTPException(status_code=400, detail="请先选择要打包的文件")
