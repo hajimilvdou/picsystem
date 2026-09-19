@@ -15,7 +15,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未配置，请先运行部署脚本生成 .env}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # postgres 18+ 破坏性变更：PGDATA 变为 /var/lib/postgresql/<MAJOR>/docker，
+      # 官方镜像的 VOLUME 也改成了 /var/lib/postgresql。此处必须挂载父目录；
+      # 挂载旧的 /var/lib/postgresql/data 会被入口脚本判定为「遗留挂载点」并直接退出。
+      # 参考：docker-library/postgres#1259
+      - db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s

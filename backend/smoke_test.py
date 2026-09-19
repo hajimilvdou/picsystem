@@ -571,6 +571,34 @@ async def main() -> None:
         assert r.status_code in (200, 500, 502), r.status_code
         print("✓ 上游账号管理接口已挂载:", r.status_code)
 
+        # 导入相关端点全部挂载（无真实上游时应为 5xx/超时类，绝不能是 404/405/403）
+        for method, path, body in [
+            ("GET", "/api/admin/upstream-accounts/groups", None),
+            ("GET", "/api/admin/upstream-accounts/cpa/pools", None),
+            ("GET", "/api/admin/upstream-accounts/sub2api/servers", None),
+            ("POST", "/api/admin/upstream-accounts/oauth/start", {"email_hint": ""}),
+            ("POST", "/api/admin/upstream-accounts/import-cleanup", {"account_ids": ["x"]}),
+        ]:
+            r = await client.request(
+                method, path, json=body, cookies=cookies,
+                headers={"x-requested-with": "XMLHttpRequest"},
+            )
+            assert r.status_code not in (403, 404, 405), f"{method} {path} -> {r.status_code}"
+        print("✓ 上游账号导入相关端点已挂载")
+
+        # 导入参数校验：空负载与缺少 access_token 都必须在本地拦下，不打到上游
+        for bad_body in (
+            {"tokens": [], "accounts": []},
+            {"accounts": [{"refresh_token": "rt-only"}]},
+            {"accounts": [{"access_token": "   "}]},
+        ):
+            r = await client.post(
+                "/api/admin/upstream-accounts", json=bad_body, cookies=cookies,
+                headers={"x-requested-with": "XMLHttpRequest"},
+            )
+            assert r.status_code == 400, (bad_body, r.status_code, r.text)
+        print("✓ 上游账号导入参数校验生效")
+
         # ---- 双池额度 / 签到 / 审批 / 内容钩子 / 批量 / 公告 ----
         from app.services.quota import compute_temp_expiry, consume, get_quotas, grant, remaining
         from app.services.checkin import do_checkin
