@@ -1,0 +1,239 @@
+# PicSystem
+
+基于 chatgpt2api 上游的多用户 AI 服务管理与在线使用系统：邀请码注册、按次额度、功能开关、用户密钥 API（newapi 风格）、统一管理后台。
+
+> 上游能力来自 [chatgpt2api](https://github.com/yukkcat/chatgpt2api)（对话 / 联网搜索 / 文生图 / 图生图 / PPT / PSD）。
+> 本系统作为其前置网关与用户体系：上游地址与密钥只需配置一处，终端用户无需接触上游密钥。
+
+## 功能总览
+
+| 角色 | 功能 |
+| :--- | :--- |
+| 普通用户 | 邀请码注册（自定义或随机生成凭证，支持注册审批制）· 首次登录滚动阅读并同意免责协议 · 对话（SSE 流式 / 多会话 / Markdown / 代码高亮 / 上游标记自动过滤）· 文生图 / 图生图（多参考图 / 图库）· 联网搜索（引用来源）· PPT / PSD 任务（进度轮询 / 下载）· 我的文件 · 个人 API 密钥（OpenAI 兼容 `/v1`）· 每日签到与兑换码领额度 · 双池额度（限时优先扣减）· 额度与调用记录查询 · 登录设备管理（陌生设备一键注销） |
+| 管理员 | 仪表盘（用户量 / 今日请求 / 成功率 / 在途请求 / 7 天趋势 / 功能分布 / 活跃用户 / 系统存储一览）· 用户管理（新建 / 编辑额度与存储上限 / 备注 / 并发 / 审批 / 统计 / 重置密码 / 删除）· 邀请码管理（次数与四项额度 / 有效期 / 停用）· 兑换码管理（纯额度兑换，永久或限时池，支持固定到期点）· 批量调额（全员或多选，永久/限时池加减设）· 调用日志（筛选 / 自动刷新）· 风控中心（登录锁定 / 限流阈值 / 注册防刷与设备指纹防多注册 / 内容关键词拦截 / 风控事件）· 上游账号（面板内直接管理 chatgpt2api 账号：列表 / 添加 / 启停 / 删除 / 同步额度，上游零端口暴露）· 存储与清理（系统存储总占用：磁盘 / 数据库 / 产物分类一览 + 可清理预估 + 一键手动清理，用户存储配额 / 产物与日志保留策略）· 功能开关与注册开关 · 签到配置 · 公告弹窗 · 站点与协议设置（内置默认值一键填入二次修改）· 上游配置与连通性测试 · 审计日志 |
+
+- **额度制度**：目前全部按次数计费（绘图按张数），`usage_logs` 已预留 token 与 cost 字段，便于后续扩展 token / 价格体系
+- **功能开关**：对话、绘图、搜索、PPT/PSD 与注册均可单独开关，实时生效
+- **上游热切换**：管理后台可直接修改上游地址 / 密钥并一键测试连通性，也可回退到 `.env` 环境变量
+- **存储治理**：每用户存储配额（全局默认 + 个人覆盖）、产物保留时长（如 24 小时自动删除）、日志保留策略与孤儿文件清理，后台每小时自动执行
+- **上游升级**：与上游 chatgpt2api 仅通过 OpenAI 兼容契约集成，升级/验证/回滚步骤见 [docs/UPSTREAM.md](./docs/UPSTREAM.md)
+
+## 架构
+
+```mermaid
+flowchart LR
+  Browser["浏览器 / API 客户端"] --> Web["web（nginx，唯一对外端口）"]
+  Web --> Api["api（FastAPI）"]
+  Api --> Db[("db（PostgreSQL 18，不暴露端口）")]
+  Api --> Up["chatgpt2api（可选内置，docker 内网）"]
+  Up --> ChatGPT["ChatGPT Web"]
+```
+
+| 容器 | 镜像 | 说明 |
+| :--- | :--- | :--- |
+| `web` | 本地构建（nginx:1.27-alpine） | 前端静态资源 + 反向代理 `/api`、`/v1`，**唯一对外端口** |
+| `api` | 本地构建（python:3.13-slim） | 业务后端，非 root 运行，仅内网 |
+| `db` | postgres:18-alpine | 应用数据库，命名卷持久化，不暴露端口 |
+| `chatgpt2api` | ghcr.io/yukkcat/chatgpt2api | 可选内置上游（profile `builtin-upstream`），**默认零端口暴露** |
+
+> 需要访问内置上游控制台（添加 ChatGPT 账号）时，在 `.env` 加一行
+> `COMPOSE_FILE=docker-compose.yml:docker-compose.console.yml` 后 `docker compose up -d`，
+> 控制台即绑定到 `127.0.0.1:3000`（仅本机回环）。远程运维也可用 SSH 隧道访问。
+> 管理面板「系统设置 → 上游服务 → 打开上游控制台」内置了该指引。
+
+## 快速部署
+
+### 一键部署（推荐）
+
+Linux / macOS：
+
+```bash
+git clone <你的仓库地址>
+cd picsystem
+bash deploy.sh
+```
+
+Windows（PowerShell）：
+
+```powershell
+git clone <你的仓库地址>
+cd picsystem
+powershell -ExecutionPolicy Bypass -File deploy.ps1
+```
+
+脚本会交互确认：**对外端口**（默认 8080）、**是否内置上游 chatgpt2api**（默认内置）、管理员账号密码（可自动生成），自动写入 `.env`（含随机生成的数据库密码 / JWT 密钥 / 上游密钥）并启动全部服务。
+
+非交互部署（全部默认）：
+
+```bash
+bash deploy.sh --yes            # Linux/macOS
+.\deploy.ps1 -Yes               # Windows
+```
+
+启动后：
+
+| 入口 | 地址 |
+| :--- | :--- |
+| 站点（用户端 + 管理后台） | `http://<服务器IP>:8080` |
+| 内置 2api 控制台（默认零暴露，需按上方说明开启） | `http://127.0.0.1:3000` |
+
+**初始管理员账号密码**：部署完成时脚本会在终端展示一次（密码为 96 位熵的安全随机串）。
+忘记时可随时在项目目录查看（`.env` 仅 root/当前用户可读）：
+
+```bash
+grep ADMIN_ .env                                  # Linux / macOS
+Get-Content .env | Select-String ADMIN_           # Windows PowerShell
+```
+
+> `ADMIN_USERNAME / ADMIN_PASSWORD` 仅在**首次启动建库**时生效；之后改 `.env` 不影响已有账号。
+> 登录后可在「个人中心 → 修改密码」更换；内置 2api 的原面板密钥（`UPSTREAM_API_KEY`）由脚本随机生成，
+> 仅供系统内部对接使用，日常运营无需理会。
+
+> **内置上游模式**：部署后需先在 2api 控制台添加 ChatGPT 账号，对话/绘图等功能才会真正可用。
+> **外部上游模式**：在部署脚本中选择 external 并提供 2api 的 URL 与 Key，或之后在「系统设置 → 上游服务」中修改。
+
+### 手动 docker compose
+
+```bash
+cp .env.example .env   # 填写 ADMIN_PASSWORD / JWT_SECRET / UPSTREAM_API_KEY / POSTGRES_PASSWORD
+# 内置上游时：
+mkdir -p data/chatgpt2api && printf '{}\n' > data/chatgpt2api-config.json
+COMPOSE_PROFILES=builtin-upstream docker compose up -d --build
+# 外部上游时（把 .env 的 UPSTREAM_BASE_URL 改为外部地址）：
+docker compose up -d --build
+```
+
+### 常用运维命令
+
+```bash
+docker compose logs -f        # 查看日志
+docker compose restart        # 重启
+docker compose down           # 停止（数据保留在卷中）
+docker compose pull && docker compose up -d --build   # 更新
+```
+
+数据库与文件数据分别在 `db-data`、`app-data` 命名卷；内置 2api 数据在 `./data/chatgpt2api` 与 `chatgpt2api-runtime` 卷。备份这些卷/目录即可完整备份。
+
+## 域名反代（HTTPS）
+
+系统已适配在域名反向代理之后运行：内置 nginx 会透传外部反代的 `X-Forwarded-Proto / X-Forwarded-Host`，
+后端据此生成正确的外网链接（如 `/v1` 返回的文件下载地址）。把 `HTTP_PORT` 映射的端口再用任意反代挂到域名即可。
+
+**推荐拓扑**：外部反代与站点同机时，在 `.env` 中设置 `HTTP_BIND=127.0.0.1:` 与 `XFF_MODE=$proxy_add_x_forwarded_for`
+（仅本机反代可达本站，真实客户端 IP 经由外层反代透传且不可伪造）。
+
+以 Nginx 为例（`HTTPS_PORTAL`、Nginx Proxy Manager 等面板同理，开启 Websocket/SSE 支持即可）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name pic.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+    add_header Strict-Transport-Security "max-age=31536000" always;   # 可选：强制 HTTPS
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;          # HTTP_PORT 映射的端口
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;   # 关键：覆盖（而非追加）客户端伪造的 XFF
+        proxy_set_header X-Forwarded-Proto $scheme;      # 关键：把 https 传给后端
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;                          # SSE 流式必需
+        proxy_read_timeout 600s;                      # 生图/PPT 耗时较长
+        client_max_body_size 100m;                    # 图生图上传
+    }
+}
+```
+
+启用 HTTPS 后，请在 `.env` 中设置 `COOKIE_SECURE=true` 并 `docker compose up -d`，使会话 Cookie 带 Secure 标记。
+
+## 用户 API（newapi 风格）
+
+用户在「API 密钥」页创建 `sk-` 密钥后，即可按 OpenAI 兼容方式调用，按各自额度按次扣费：
+
+```bash
+curl http://<服务器IP>:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-你的密钥" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+| 接口 | 功能 | 计费 |
+| :--- | :--- | :--- |
+| `GET /v1/models` | 模型目录 | 免费 |
+| `POST /v1/chat/completions` | 对话（支持 stream） | 1 次/次 |
+| `POST /v1/search` | 联网搜索 | 1 次/次 |
+| `POST /v1/images/generations` | 文生图 | n 次/次（按张数，失败退还） |
+| `POST /v1/images/edits` | 图生图（multipart） | n 次/次 |
+| `POST /v1/ppt/generations` · `POST /v1/psd/generations` | 创建 PPT/PSD 任务 | 1 次/次（失败退还） |
+| `GET /v1/editable-file-tasks?ids=` | 任务查询 | 免费 |
+| `GET /v1/files/{id}/download` | 下载 API 生成的文件 | 免费 |
+
+## 安全与风控
+
+- 密码 argon2 哈希；会话为 httpOnly + SameSite=Strict Cookie（JWT，改密/重置/禁用即失效全部旧会话）
+- 网页端写操作要求自定义防伪头（防 CSRF，含登录 CSRF）；登录/注册接口 IP 限流（10 次/分钟）
+- **登录防爆破**：连续失败（默认 5 次）按用户名临时锁定（默认 15 分钟），管理员可在风控中心即时解锁
+- **用户级限流**：功能调用默认每用户 20 次/分钟；API 密钥固定 60 次/分钟，超限写入风控事件
+- **注册防刷**：邀请码 + 单 IP 每日注册上限（默认 10），邀请码校验信息刻意模糊防枚举
+- **风控中心**：登录失败/锁定/限流/注册拦截事件全量记录，阈值在线可调
+- API 密钥只存 sha256，明文仅创建时展示一次；上游密钥不出服务端，后台页面仅显示掩码
+- 全部 SQL 经 ORM 参数化；输入经 pydantic 校验；文件路径白名单 + 随机文件名 + 越界校验
+- nginx 安全响应头（CSP / nosniff / DENY / no-referrer）；仅 web 暴露端口，数据库零暴露；后端容器非 root 运行
+- `.env` 权限 600 且默认不提交（已入 .gitignore）；管理端关键操作写入审计日志
+
+## 本地开发
+
+```bash
+# 后端（Python 3.13，默认 SQLite，无需 PostgreSQL）
+cd backend
+python -m venv .venv && .venv/Scripts/activate   # Windows；Linux/macOS 用 source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload                    # http://127.0.0.1:8000
+
+# 前端（Node 20+，开发服务器代理 /api 与 /v1 到 8000）
+cd frontend
+npm install
+npm run dev                                      # http://127.0.0.1:5173
+
+# 后端冒烟测试（不依赖上游）
+python smoke_test.py
+```
+
+开发时上游相关环境变量可直接用 shell 注入，例如 `UPSTREAM_BASE_URL=http://127.0.0.1:3000 UPSTREAM_API_KEY=xxx`。
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `HTTP_PORT` | `8080` | 对外 HTTP 端口 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | 初始管理员（仅首次启动创建） |
+| `JWT_SECRET` | 必填 | 会话签名密钥（≥32 字节随机串） |
+| `UPSTREAM_BASE_URL` | `http://chatgpt2api` | 上游地址（后台可在线覆盖） |
+| `UPSTREAM_API_KEY` | 必填 | 上游密钥；内置模式同时作为 2api 的 AUTH_KEY |
+| `POSTGRES_*` | — | 内联 PostgreSQL，不暴露端口 |
+| `COOKIE_SECURE` | `false` | HTTPS 反代时置 `true` |
+| `CHATGPT2API_CONSOLE_PORT` | `3000` | 内置 2api 控制台（仅 127.0.0.1） |
+
+## 项目结构
+
+```
+├── deploy.sh / deploy.ps1    # 一键部署
+├── docker-compose.yml        # 四服务编排（db / api / web / 可选 chatgpt2api）
+├── docker-compose.console.yml# 可选叠加：暴露内置上游控制台到本机回环
+├── docs/UPSTREAM.md          # 上游升级 / 验证 / 回滚指南
+├── docs/UPSTREAM-ADMIN-API.md# 上游账号管理 API 适配预案（路线 C）
+├── backend/                  # FastAPI 后端
+│   ├── app/routers/          # auth、chat、search、images、ppt、files、keys、admin_*、v1
+│   └── app/services/         # 上游代理、额度、存储、清理、统计、任务同步、风控、会话
+└── frontend/                 # Vue 3 + Element Plus 前端
+    ├── src/views/            # 用户端页面
+    └── src/views/admin/      # 管理端页面
+```
+
+## 许可与免责
+
+- 本项目代码以 [MIT](./LICENSE) 发布
+- 上游 chatgpt2api 由其作者以 AGPL-3.0 发布，内置部署时其镜像与能力仍受其条款约束；请遵守其服务条款与当地法律法规，勿用于违规用途

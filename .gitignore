@@ -1,0 +1,35 @@
+# ---- 本仓库不包含以下内容 ----
+# 上游参考项目（仅本地参考，请勿提交）
+chatgpt2api-main/
+
+# 环境与密钥
+.env
+*.local
+
+# 数据与产物
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node / 前端
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

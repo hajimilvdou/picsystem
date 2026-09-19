@@ -1,0 +1,99 @@
+name: picsystem
+
+# PicSystem 一键部署编排。
+# 对外只暴露 web 的 HTTP 端口；db / api / chatgpt2api 均只在内部网络可达。
+# 内置上游 chatgpt2api 通过 COMPOSE_PROFILES=builtin-upstream 开启（部署脚本默认开启）。
+
+services:
+  db:
+    image: postgres:18-alpine
+    container_name: picsystem-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-picsystem}
+      POSTGRES_USER: ${POSTGRES_USER:-picsystem}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未配置，请先运行部署脚本生成 .env}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  api:
+    build: ./backend
+    container_name: picsystem-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-picsystem}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-picsystem}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-http://chatgpt2api}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:?UPSTREAM_API_KEY 未配置，请先运行部署脚本生成 .env}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 未配置，请先运行部署脚本生成 .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD 未配置，请先运行部署脚本生成 .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SITE_NAME: ${SITE_NAME:-PicSystem}
+      DATA_DIR: /data
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - app-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 20s
+    networks: [internal]
+
+  web:
+    build: ./frontend
+    container_name: picsystem-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      # X-Forwarded-For 生成方式：
+      #   $remote_addr（默认，防伪造，适用于本 nginx 直接对外）
+      #   $proxy_add_x_forwarded_for（外部还有一层可信反代时透传真实客户端 IP，
+      #                              此时建议同时把端口绑定到 127.0.0.1，见 HTTP_BIND）
+      XFF_MODE: ${XFF_MODE:-$$remote_addr}
+    # 唯一对外暴露的端口；HTTP_BIND 可设为 127.0.0.1: 仅本机反代可达
+    ports:
+      - "${HTTP_BIND:-}${HTTP_PORT:-8080}:80"
+    networks: [internal]
+
+  # 可选：内置上游 chatgpt2api（profile: builtin-upstream）
+  # 默认【零端口暴露】：控制台只在内网可达。需要本机访问控制台时，用叠加文件启动：
+  #   docker compose -f docker-compose.yml -f docker-compose.console.yml up -d
+  # 或在 .env 写入 COMPOSE_FILE（Linux/macOS 用冒号分隔，Windows 用分号）：
+  #   COMPOSE_FILE=docker-compose.yml:docker-compose.console.yml
+  chatgpt2api:
+    profiles: ["builtin-upstream"]
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/yukkcat/chatgpt2api:latest}
+    container_name: picsystem-chatgpt2api
+    restart: unless-stopped
+    volumes:
+      - chatgpt2api-runtime:/app
+      - ./data/chatgpt2api:/app/data
+      - ./data/chatgpt2api-config.json:/app/config.json
+    environment:
+      CHATGPT2API_AUTH_KEY: ${UPSTREAM_API_KEY:?}
+      CHATGPT2API_THREAD_TOKENS: ${CHATGPT2API_THREAD_TOKENS:-120}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  db-data:
+  app-data:
+  chatgpt2api-runtime:

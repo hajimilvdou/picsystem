@@ -1,0 +1,13 @@
+# 可选叠加：把内置 chatgpt2api 控制台绑定到本机回环端口（仅 127.0.0.1，非公网）。
+# 用法一（临时）：
+#   docker compose -f docker-compose.yml -f docker-compose.console.yml up -d
+# 用法二（常驻）：在 .env 中写入 COMPOSE_FILE 后照常 docker compose up -d。
+#   Linux/macOS: COMPOSE_FILE=docker-compose.yml:docker-compose.console.yml
+#   Windows:     COMPOSE_FILE=docker-compose.yml;docker-compose.console.yml
+# 远程服务器运维时，更推荐不开绑定，改用 SSH 隧道：
+#   ssh -L 3000:127.0.0.1:3000 user@server  （仍需本叠加文件先生效）
+
+services:
+  chatgpt2api:
+    ports:
+      - "127.0.0.1:${CHATGPT2API_CONSOLE_PORT:-3000}:80"

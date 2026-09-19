@@ -1,0 +1,172 @@
+"""绘图：文生图 / 图生图，结果落本地图库。"""
+from __future__ import annotations
+
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile
+
+from ..config import settings
+from ..database import get_db
+from ..deps import client_ip, get_current_user, inflight, inflight_limit, user_rate_limit
+from ..models import User
+from ..schemas import ImageGenIn
+from ..services.content_guard import check_content
+from ..services.guard import require_feature
+from ..services.image_results import persist_image_results
+from ..services.quota import consume, refund
+from ..services.storage import StorageFullError
+from ..services.upstream import UpstreamError, request_json
+from ..services.usage import log_usage
+
+router = APIRouter(prefix="/api/images", tags=["images"])
+
+MAX_REFERENCE_IMAGES = 4
+
+
+def _file_out(row) -> dict:
+    return {"id": row.id, "url": f"/api/files/{row.id}/download", "mime": row.mime, "size": row.size}
+
+
+async def _run_generation(
+    *,
+    request: Request,
+    db: AsyncSession,
+    user: User,
+    endpoint: str,
+    json_body: dict | None = None,
+    files: list | None = None,
+    form: dict | None = None,
+    n: int,
+    model: str,
+    prompt: str,
+) -> list:
+    base_url, api_key = await require_feature(db, "image")
+    await check_content(
+        db, prompt, user_id=user.id, username=user.username, ip=client_ip(request), endpoint=endpoint,
+    )
+    ok, take_temp, take_perm = await consume(db, user.id, "image", n)
+    if not ok:
+        raise HTTPException(status_code=403, detail=f"绘图次数额度不足（需要 {n} 次），请联系管理员")
+
+    started = time.perf_counter()
+    status, error, error_status = "success", "", 502
+    saved = []
+    try:
+        async with inflight.acquire(f"user:{user.id}", await inflight_limit(db, user)):
+            data = await request_json(
+                "POST", base_url, api_key, endpoint, json_body=json_body, files=files, data=form
+            )
+        saved = await persist_image_results(
+            db, user=user, base_url=base_url, api_key=api_key, data=data, prompt=prompt
+        )
+        if not saved:
+            status, error = "failed", "上游未返回有效图片"
+    except HTTPException:
+        await refund(db, user.id, "image", n, take_temp, take_perm)
+        raise
+    except UpstreamError as exc:
+        status, error = "failed", exc.message
+    except StorageFullError as exc:
+        status, error, error_status = "failed", str(exc), 403
+    latency = int((time.perf_counter() - started) * 1000)
+
+    failed_units = n - len(saved)
+    if failed_units > 0:
+        # 按成功比例退回（优先退限时组，与扣减顺序一致）
+        ft = min(take_temp, failed_units)
+        await refund(db, user.id, "image", failed_units, ft, failed_units - ft)
+    await log_usage(
+        db,
+        user_id=user.id,
+        feature="image",
+        endpoint=endpoint,
+        model=model,
+        status=status,
+        error=error,
+        latency_ms=latency,
+        units=max(len(saved), 1),
+        ip=client_ip(request),
+    )
+    if status != "success":
+        raise HTTPException(status_code=error_status, detail=error)
+    return saved
+
+
+@router.post("/generations", dependencies=[Depends(user_rate_limit("image"))])
+async def generate(
+    body: ImageGenIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    saved = await _run_generation(
+        request=request,
+        db=db,
+        user=user,
+        endpoint="/v1/images/generations",
+        json_body={
+            "prompt": body.prompt,
+            "model": body.model,
+            "n": body.n,
+            "size": body.size,
+            "quality": body.quality,
+            "response_format": "b64_json",
+        },
+        n=body.n,
+        model=body.model,
+        prompt=body.prompt,
+    )
+    return {"files": [_file_out(row) for row in saved]}
+
+
+@router.post("/edits", dependencies=[Depends(user_rate_limit("image"))])
+async def edit(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    form = await request.form()
+    prompt = str(form.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="请填写提示词")
+    model = str(form.get("model") or "gpt-image-2")[:100]
+    size = str(form.get("size") or "")[:32] or None
+    quality = str(form.get("quality") or "auto")[:16]
+    try:
+        n = int(form.get("n") or 1)
+    except ValueError:
+        n = 1
+    n = min(max(n, 1), 4)
+
+    uploads = [v for v in form.getlist("images") if isinstance(v, UploadFile)]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="请至少上传一张参考图")
+    if len(uploads) > MAX_REFERENCE_IMAGES:
+        raise HTTPException(status_code=400, detail=f"参考图最多 {MAX_REFERENCE_IMAGES} 张")
+
+    files = []
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    for up in uploads:
+        mime = (up.content_type or "").lower()
+        if not mime.startswith("image/"):
+            raise HTTPException(status_code=400, detail="仅支持图片文件作为参考图")
+        content = await up.read()
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=400, detail=f"单张图片不能超过 {settings.max_upload_mb}MB")
+        files.append(("image", (up.filename or "reference.png", content, mime)))
+
+    saved = await _run_generation(
+        request=request,
+        db=db,
+        user=user,
+        endpoint="/v1/images/edits",
+        form={"prompt": prompt, "model": model, "n": str(n), "size": size or "", "quality": quality,
+              "response_format": "b64_json"},
+        files=files,
+        n=n,
+        model=model,
+        prompt=prompt,
+    )
+    return {"files": [_file_out(row) for row in saved]}
