@@ -23,6 +23,11 @@ from ..models import ApiKey, PptTask, StoredFile, User, UserStatus
 from ..security import hash_api_key
 from ..services.content_guard import check_content, extract_texts
 from ..services.guard import require_feature
+from ..services.image_inputs import (
+    IMAGE_REFERENCE_FIELDS,
+    MASK_REFERENCE_FIELDS,
+    collect_uploads,
+)
 from ..services.image_results import persist_image_results
 from ..services.ppt_tasks import ACTIVE_STATUSES, claim_refund, submit_task, sync_lock, sync_task
 from ..services.quota import consume, refund
@@ -355,7 +360,7 @@ async def image_edits(
         raise _openai_error("prompt 不能为空", 400)
     model = str(form_data.get("model") or "gpt-image-2")
     response_format = str(form_data.get("response_format") or "b64_json")
-    uploads = [v for v in form_data.getlist("image") if hasattr(v, "read")]
+    uploads = collect_uploads(form_data, IMAGE_REFERENCE_FIELDS)
     if not uploads:
         raise _openai_error("缺少 image 文件", 400)
     if len(uploads) > 4:
@@ -369,7 +374,7 @@ async def image_edits(
         files.append(("image", (up.filename or "image.png", content, up.content_type or "image/png")))
 
     # 局部编辑：可选 mask（不透明区域 = 需要重绘的范围），原样透传给上游
-    masks = [v for v in form_data.getlist("mask") if hasattr(v, "read")]
+    masks = collect_uploads(form_data, MASK_REFERENCE_FIELDS)
     if len(masks) > 1:
         raise _openai_error("mask 只能上传一张", 400)
     for up in masks:

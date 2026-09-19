@@ -245,6 +245,8 @@ curl http://<服务器IP>:9090/v1/chat/completions \
 | `GET /v1/editable-file-tasks?ids=` | 任务查询 | 免费 |
 | `GET /v1/files/{id}/download` | 下载 API 生成的文件 | 免费 |
 
+> `/v1/images/edits` 的图片字段同时接受 `image`、`image[]`、`images`、`images[]`，遮罩接受 `mask`、`mask[]`，所以 OpenAI 官方 SDK 与常见脚本的写法都能直接用；单次最多 4 张参考图、1 张遮罩，单张默认不超过 20MB。
+
 ## 安全与风控
 
 - 密码 argon2 哈希；会话为 httpOnly + SameSite=Strict Cookie（JWT，改密/重置/禁用即失效全部旧会话）

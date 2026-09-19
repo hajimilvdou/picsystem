@@ -16,7 +16,8 @@ from ..deps import require_admin
 from ..models import AuditLog, RiskEvent, StoredFile, UsageLog, User, UserSession
 from ..services.cleanup import _int_or, count_orphan_files, is_running, run_cleanup
 from ..services.settings_store import get_all_settings
-from ..services.storage import data_root
+from ..services.storage import data_root, dir_usage
+from ..services.thumbnails import thumbs_root
 from ..services.usage import audit
 
 router = APIRouter(prefix="/api/admin/storage", tags=["admin-storage"], dependencies=[Depends(require_admin)])
@@ -131,6 +132,8 @@ async def storage_overview(db: AsyncSession = Depends(get_db)):
         )
     ) or 0
 
+    thumb_bytes, thumb_files = dir_usage(thumbs_root())
+
     # 最近一次手动清理（审计日志）
     last_cleanup = (
         await db.execute(
@@ -155,6 +158,9 @@ async def storage_overview(db: AsyncSession = Depends(get_db)):
             "at": last_cleanup[0].isoformat() if last_cleanup else None,
             "detail": last_cleanup[1] if last_cleanup else "",
         },
+        # 缩略图单独统计：它们不进用户配额（不占 StoredFile.size），但确实占磁盘
+        "thumbnail_bytes": thumb_bytes,
+        "thumbnail_files": thumb_files,
         "storage_quota_mb_default": _int_or(settings.get("storage_quota_mb_default"), 0),
         "file_retention_hours": retention_hours,
         "log_retention_hours": log_hours,

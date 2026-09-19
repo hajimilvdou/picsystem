@@ -14,6 +14,11 @@ from ..models import User
 from ..schemas import ImageGenIn
 from ..services.content_guard import check_content
 from ..services.guard import require_feature
+from ..services.image_inputs import (
+    IMAGE_REFERENCE_FIELDS,
+    MASK_REFERENCE_FIELDS,
+    collect_uploads,
+)
 from ..services.image_results import persist_image_results
 from ..services.quota import consume, refund
 from ..services.storage import StorageFullError
@@ -23,7 +28,8 @@ from ..services.usage import log_usage
 router = APIRouter(prefix="/api/images", tags=["images"])
 
 MAX_REFERENCE_IMAGES = 4
-# 局部编辑的遮罩：白色/不透明区域 = 需要重绘的部分（与上游 /v1/images/edits 的 mask 口径一致）
+# 转发给上游时使用的字段名（不透明区域 = 需要重绘的部分，与上游 mask 口径一致）。
+# 注意区分：入参接受 mask / mask[] 多个别名（见 services/image_inputs.py），出参统一用 mask。
 MASK_FIELD = "mask"
 
 
@@ -161,7 +167,7 @@ async def edit(
         n = 1
     n = min(max(n, 1), 4)
 
-    uploads = [v for v in form.getlist("images") if isinstance(v, UploadFile)]
+    uploads = collect_uploads(form, IMAGE_REFERENCE_FIELDS)
     if not uploads:
         raise HTTPException(status_code=400, detail="请至少上传一张参考图")
     if len(uploads) > MAX_REFERENCE_IMAGES:
@@ -175,7 +181,7 @@ async def edit(
     # 局部编辑：可选遮罩（不透明区域 = 需要重绘的范围），按上游 mask 字段原样透传。
     # 上游 /v1/images/edits 的字段白名单为 {image, image[], images, images[], image_url,
     # image_url[]} + {mask, mask[]}，这里用最简的 image / mask。
-    masks = [v for v in form.getlist(MASK_FIELD) if isinstance(v, UploadFile)]
+    masks = collect_uploads(form, MASK_REFERENCE_FIELDS)
     if len(masks) > 1:
         raise HTTPException(status_code=400, detail="遮罩只能上传一张")
     if masks:

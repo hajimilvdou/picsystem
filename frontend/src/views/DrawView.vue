@@ -265,6 +265,7 @@ onMounted(async () => {
               <el-image
                 :src="thumbSrc(f)"
                 fit="cover"
+                lazy
                 class="img-thumb"
                 :preview-src-list="[f.url]"
                 preview-teleported
@@ -287,6 +288,7 @@ onMounted(async () => {
               <el-image
                 :src="thumbSrc(f)"
                 fit="cover"
+                lazy
                 class="img-thumb"
                 :preview-src-list="[f.url]"
                 preview-teleported

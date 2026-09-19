@@ -152,6 +152,28 @@ async def main() -> None:
         assert r.status_code in (500, 502) and "error" in r.json(), (r.status_code, r.text)
         print("✓ /v1/models 无上游时返回 OpenAI 风格错误:", r.status_code)
 
+        # /v1 图生图：图片字段别名都要收下（OpenAI SDK 传 image[]，脚本常传重复的 image）
+        # 收到并转发后失败于上游不可达（502），而不是入参错误（400）
+        for alias in ("image", "image[]", "images", "images[]"):
+            r = await client.post(
+                "/v1/images/edits",
+                data={"prompt": "把背景换成海边"},
+                files=[(alias, ("ref.png", b"ref-bytes", "image/png"))],
+                headers={"Authorization": f"Bearer {sk}"},
+            )
+            assert r.status_code not in (400, 422), (alias, r.status_code, r.text)
+        r = await client.post(
+            "/v1/images/edits",
+            data={"prompt": "只重绘涂抹区域"},
+            files=[
+                ("image[]", ("ref.png", b"ref-bytes", "image/png")),
+                ("mask[]", ("mask.png", b"mask-bytes", "image/png")),
+            ],
+            headers={"Authorization": f"Bearer {sk}"},
+        )
+        assert r.status_code not in (400, 422), (r.status_code, r.text)
+        print("✓ /v1 图生图接受 image / image[] / images / images[] 与 mask / mask[] 别名")
+
         # 管理员设置读取 + 上游测试接口（无上游 → ok=false）
         r = await client.get("/api/admin/settings", cookies=cookies)
         assert r.status_code == 200, r.text
@@ -219,7 +241,15 @@ async def main() -> None:
             headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
         )
         assert r.status_code == 400 and "参考图" in r.json()["detail"], r.text
-        print("✓ 局部编辑遮罩：单张放行 + 多张/非图片/缺参考图被拦截")
+        for alias in ("image", "image[]", "images", "images[]"):
+            r = await client.post(
+                "/api/images/edits",
+                data={"prompt": "x"},
+                files=[(alias, ("ref.png", b"ref", "image/png"))],
+                headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+            )
+            assert r.status_code == 403 and "关闭" in r.json()["detail"], (alias, r.status_code, r.text)
+        print("✓ 局部编辑遮罩：单张放行 + 多张/非图片/缺参考图被拦截 + 参考图字段别名")
 
         # 注册开关：匿名公开配置同步，关闭后注册被拒
         r = await client.get("/api/auth/public-config")
@@ -684,6 +714,7 @@ async def main() -> None:
         assert ov["disk"]["total"] > 0 and ov["disk"]["free"] >= 0, ov["disk"]
         assert ov["db_bytes"] is None or ov["db_bytes"] >= 0, ov["db_bytes"]
         assert isinstance(ov["by_kind"], list), ov["by_kind"]
+        assert ov["thumbnail_bytes"] >= 0 and ov["thumbnail_files"] >= 0, ov
         cl = ov["cleanable"]
         for key in ("expired_files", "expired_bytes", "orphan_files", "orphan_bytes",
                     "old_usage_logs", "old_risk_events", "old_audit_logs", "stale_sessions"):

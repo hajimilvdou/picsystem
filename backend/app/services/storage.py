@@ -56,6 +56,26 @@ def resolve_path(rel_path: str) -> Path:
     return candidate
 
 
+def dir_usage(root) -> tuple[int, int]:
+    """递归统计目录的文件数与总字节（不存在时返回 0,0）。"""
+    from pathlib import Path as _Path
+
+    base = _Path(root)
+    if not base.exists():
+        return 0, 0
+    total = 0
+    count = 0
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            total += path.stat().st_size
+            count += 1
+        except OSError:
+            continue
+    return total, count
+
+
 def delete_file(rel_path: str) -> None:
     """删除产物文件及其缩略图。
 
