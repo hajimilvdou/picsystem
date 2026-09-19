@@ -416,6 +416,69 @@ async def main() -> None:
             inflight.unlink()
             print("✓ 在途文件宽限期保护生效")
 
+        # ---- 图库标签 ----
+        async with SessionLocal() as s:
+            tester = (await s.execute(select(User).where(User.username == "tester"))).scalar_one()
+            samples = [
+                StoredFile(user_id=tester.id, kind="image", filename=f"tag{i}.png",
+                           path=f"files/test/tag{i}.png", mime="image/png", size=10)
+                for i in range(3)
+            ]
+            s.add_all(samples)
+            await s.commit()
+            sample_ids = [row.id for row in samples]
+
+        # 设置标签：去重、剔除逗号等非法字符、超长截断
+        r = await client.patch(
+            f"/api/files/{sample_ids[0]}",
+            json={"tags": ["风景", "猫", "风景", " bad,tag ", "x" * 40]},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200, r.text
+        tags = r.json()["tags"]
+        assert len(tags) == 4 and tags[0] == "风景" and "猫" in tags and "badtag" in tags, tags
+        assert all(len(t) <= 24 for t in tags), tags
+
+        # 超出上限只保留前 10 个
+        r = await client.patch(
+            f"/api/files/{sample_ids[1]}",
+            json={"tags": [f"t{i}" for i in range(20)]},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200 and len(r.json()["tags"]) == 10, r.text
+
+        # 列表带出标签；按标签筛选是精确匹配（前缀不命中）
+        r = await client.get("/api/files", params={"kind": "image"}, cookies=user_cookies)
+        rows = {item["id"]: item for item in r.json()["items"]}
+        assert rows[sample_ids[0]]["tags"] == tags, rows[sample_ids[0]]
+        r = await client.get("/api/files", params={"kind": "image", "tag": "猫"}, cookies=user_cookies)
+        data = r.json()
+        assert data["total"] == 1 and data["items"][0]["id"] == sample_ids[0], data
+        r = await client.get("/api/files", params={"kind": "image", "tag": "风"}, cookies=user_cookies)
+        assert r.json()["total"] == 0, r.json()
+
+        # 标签聚合
+        r = await client.get("/api/files/tags", params={"kind": "image"}, cookies=user_cookies)
+        agg = {item["tag"]: item["count"] for item in r.json()["items"]}
+        assert agg.get("猫") == 1 and agg.get("风景") == 1, agg
+
+        # 越权：管理员 cookie 也改不了别人（tester）的文件
+        r = await client.patch(
+            f"/api/files/{sample_ids[0]}", json={"tags": []},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=cookies,
+        )
+        assert r.status_code == 404, r.text
+
+        # 清空后不再被筛出
+        r = await client.patch(
+            f"/api/files/{sample_ids[0]}", json={"tags": []},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200 and r.json()["tags"] == [], r.text
+        r = await client.get("/api/files", params={"kind": "image", "tag": "猫"}, cookies=user_cookies)
+        assert r.json()["total"] == 0, r.json()
+        print("✓ 图库标签：清洗/去重/限量、精确筛选、聚合、越权拦截、清空")
+
         # 管理端存储统计与手动清理接口
         r = await client.get("/api/admin/storage", cookies=cookies)
         assert r.status_code == 200 and "total_bytes" in r.json(), r.text
@@ -942,6 +1005,7 @@ async def main() -> None:
         "user_quotas": ["temp_amount", "temp_expires_at"],
         "invite_codes": ["pool_type", "valid_days", "valid_hours", "fixed_expires_at"],
         "redemption_codes": ["fixed_expires_at"],
+        "stored_files": ["tags"],
     }
     legacy_path = Path("./data-smoke/legacy.db")
     legacy_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1057,7 +1121,7 @@ async def main() -> None:
     # 相差即说明「迁移加了列但模型漏加」（新装缺列）或「模型加了列但没写迁移」（老库缺列）。
     from app.database import engine as app_engine
 
-    compared_tables = ("users", "user_quotas", "invite_codes", "redemptions")
+    compared_tables = ("users", "user_quotas", "invite_codes", "redemptions", "stored_files")
     fresh_columns: dict[str, set] = {}
     async with app_engine.connect() as conn:
         for table in compared_tables:

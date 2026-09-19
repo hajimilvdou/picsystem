@@ -224,6 +224,8 @@ class StoredFile(Base):
     mime: Mapped[str] = mapped_column(sa.String(100), default="application/octet-stream")
     size: Mapped[int] = mapped_column(sa.Integer, default=0)
     prompt: Mapped[str] = mapped_column(sa.Text, default="")
+    # 图库标签：逗号分隔存放（标签本身不允许逗号，见 services/tags.py）
+    tags: Mapped[str] = mapped_column(sa.String(300), default="")
     created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
 
 

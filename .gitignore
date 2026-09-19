@@ -27,6 +27,10 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# 本地临时产物（构建验证输出 / 冒烟测试副本，禁止提交）
+**/.tmp-*/
+**/.tmpcheck/
+
 # 系统
 .DS_Store
 Thumbs.db
