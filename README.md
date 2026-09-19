@@ -43,12 +43,14 @@ flowchart LR
 
 ## 快速部署
 
+前置要求：已安装 Docker（含 compose 插件）。全新 Ubuntu 服务器可一行安装：`curl -fsSL https://get.docker.com | bash`
+
 ### 一键部署（推荐）
 
 Linux / macOS：
 
 ```bash
-git clone <你的仓库地址>
+git clone https://github.com/hajimilvdou/picsystem.git
 cd picsystem
 bash deploy.sh
 ```
@@ -56,43 +58,40 @@ bash deploy.sh
 Windows（PowerShell）：
 
 ```powershell
-git clone <你的仓库地址>
+git clone https://github.com/hajimilvdou/picsystem.git
 cd picsystem
 powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
 
-脚本会交互确认：**对外端口**（默认 8080）、**是否内置上游 chatgpt2api**（默认内置）、管理员账号密码（可自动生成），自动写入 `.env`（含随机生成的数据库密码 / JWT 密钥 / 上游密钥）并启动全部服务。
+脚本会交互确认：**对外端口**（默认 9090）、**是否内置上游 chatgpt2api**（默认内置）、**管理员账号**（密码留空则自动生成 96 位熵随机强密码），随后自动写入 `.env`（数据库密码 / JWT 密钥 / 上游密钥全部随机生成）并构建启动全部服务。
 
-非交互部署（全部默认）：
+全部使用默认值、免交互：
 
 ```bash
-bash deploy.sh --yes            # Linux/macOS
+bash deploy.sh --yes            # Linux / macOS
 .\deploy.ps1 -Yes               # Windows
 ```
 
-启动后：
+### 部署完成后
 
 | 入口 | 地址 |
 | :--- | :--- |
-| 站点（用户端 + 管理后台） | `http://<服务器IP>:8080` |
-| 内置 2api 控制台（默认零暴露，需按上方说明开启） | `http://127.0.0.1:3000` |
+| 站点（用户端 + 管理后台） | `http://<服务器IP>:9090` |
+| 内置 2api 控制台（默认零端口暴露，需按上方说明开启） | `http://127.0.0.1:3000` |
 
-**初始管理员账号密码**：部署完成时脚本会在终端展示一次（密码为 96 位熵的安全随机串）。
-忘记时可随时在项目目录查看（`.env` 仅 root/当前用户可读）：
+**查看初始管理员账号密码**：部署完成时脚本会在终端展示一次；忘记后可随时在项目目录查看（`.env` 仅当前用户可读）：
 
 ```bash
 grep ADMIN_ .env                                  # Linux / macOS
 Get-Content .env | Select-String ADMIN_           # Windows PowerShell
 ```
 
-> `ADMIN_USERNAME / ADMIN_PASSWORD` 仅在**首次启动建库**时生效；之后改 `.env` 不影响已有账号。
-> 登录后可在「个人中心 → 修改密码」更换；内置 2api 的原面板密钥（`UPSTREAM_API_KEY`）由脚本随机生成，
-> 仅供系统内部对接使用，日常运营无需理会。
-
+> `ADMIN_USERNAME / ADMIN_PASSWORD` 仅在**首次启动建库**时生效；之后改 `.env` 不影响已有账号，登录后可在「个人中心 → 修改密码」更换。
+> 内置 2api 的原面板密钥（`UPSTREAM_API_KEY`）由脚本随机生成，仅供系统内部对接使用，日常运营无需理会。
 > **内置上游模式**：部署后需先在 2api 控制台添加 ChatGPT 账号，对话/绘图等功能才会真正可用。
-> **外部上游模式**：在部署脚本中选择 external 并提供 2api 的 URL 与 Key，或之后在「系统设置 → 上游服务」中修改。
+> **外部上游模式**：部署脚本中选择 external 并提供 2api 的 URL 与 Key，或之后在「系统设置 → 上游服务」中修改。
 
-### 手动 docker compose
+### 手动 docker compose（可选，不推荐）
 
 ```bash
 cp .env.example .env   # 填写 ADMIN_PASSWORD / JWT_SECRET / UPSTREAM_API_KEY / POSTGRES_PASSWORD
@@ -132,7 +131,7 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;   # 可选：强制 HTTPS
 
     location / {
-        proxy_pass http://127.0.0.1:8080;          # HTTP_PORT 映射的端口
+        proxy_pass http://127.0.0.1:9090;          # HTTP_PORT 映射的端口
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -154,7 +153,7 @@ server {
 用户在「API 密钥」页创建 `sk-` 密钥后，即可按 OpenAI 兼容方式调用，按各自额度按次扣费：
 
 ```bash
-curl http://<服务器IP>:8080/v1/chat/completions \
+curl http://<服务器IP>:9090/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-你的密钥" \
   -d '{"model":"auto","messages":[{"role":"user","content":"你好"}],"stream":true}'
@@ -208,7 +207,7 @@ python smoke_test.py
 
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
-| `HTTP_PORT` | `8080` | 对外 HTTP 端口 |
+| `HTTP_PORT` | `9090` | 对外 HTTP 端口 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | 初始管理员（仅首次启动创建） |
 | `JWT_SECRET` | 必填 | 会话签名密钥（≥32 字节随机串） |
 | `UPSTREAM_BASE_URL` | `http://chatgpt2api` | 上游地址（后台可在线覆盖） |

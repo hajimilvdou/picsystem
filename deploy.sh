@@ -3,7 +3,7 @@
 # PicSystem 一键部署脚本（Linux / macOS）
 #   curl / git clone 后：bash deploy.sh
 # 可选参数：
-#   --port 8080            对外 HTTP 端口
+#   --port 9090            对外 HTTP 端口
 #   --builtin / --external 内置或外部上游 chatgpt2api
 #   --admin-user admin     管理员用户名
 #   --admin-pass <密码>     管理员密码（缺省自动生成）
@@ -78,7 +78,7 @@ if [[ -f .env ]]; then
 fi
 
 # ---- 3. 交互配置 ----
-[[ -z "$HTTP_PORT" ]] && ask HTTP_PORT "对外 HTTP 端口" "8080"
+[[ -z "$HTTP_PORT" ]] && ask HTTP_PORT "对外 HTTP 端口" "9090"
 if ! [[ "$HTTP_PORT" =~ ^[0-9]+$ ]] || (( HTTP_PORT < 1 || HTTP_PORT > 65535 )); then
   die "端口无效：$HTTP_PORT（需为 1-65535 的数字）"
 fi

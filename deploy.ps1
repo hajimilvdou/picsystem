@@ -3,7 +3,7 @@
 #   右键使用 PowerShell 运行，或：
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1
 # 可选参数：
-#   -Port 8080            对外 HTTP 端口
+#   -Port 9090            对外 HTTP 端口
 #   -Builtin / -External  内置或外部上游 chatgpt2api
 #   -AdminUser admin      管理员用户名
 #   -AdminPass <密码>      管理员密码（缺省自动生成）
@@ -64,7 +64,7 @@ if (Test-Path ".env") {
 
 # ---- 3. 交互配置 ----
 if ($Port -le 0) {
-    $raw = Ask "对外 HTTP 端口" "8080"
+    $raw = Ask "对外 HTTP 端口" "9090"
     $parsed = 0
     if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 65535) {
         Die "端口无效：$raw（需为 1-65535 的数字）"
