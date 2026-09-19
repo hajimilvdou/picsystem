@@ -536,6 +536,63 @@ async def main() -> None:
         assert not (stale.parent / "half.jpg.tmp").exists()
         print("✓ 图片缩略图：按需生成 400px JPEG、越权拦截、随产物删除、孤儿兜底清理")
 
+        # ---- 打包下载（ZIP） ----
+        import io
+        import zipfile
+
+        async with SessionLocal() as s:
+            tester = (await s.execute(select(User).where(User.username == "tester"))).scalar_one()
+            archived = []
+            for index in range(3):
+                rel = f"files/test/arch-{index}.png"
+                abs_path = file_data_root() / rel
+                abs_path.parent.mkdir(parents=True, exist_ok=True)
+                abs_path.write_bytes(b"PNG-" + bytes([index]) * 8)
+                archived.append(
+                    StoredFile(user_id=tester.id, kind="image", filename="shot.png",  # 同名，验证 zip 内去重
+                               path=rel, mime="image/png", size=abs_path.stat().st_size)
+                )
+            s.add_all(archived)
+            await s.commit()
+            arch_ids = [row.id for row in archived]
+
+        r = await client.get(
+            "/api/files/archive",
+            params={"ids": ",".join(str(i) for i in arch_ids)}, cookies=user_cookies,
+        )
+        assert r.status_code == 200 and r.headers["content-type"] == "application/zip", r.text
+        with zipfile.ZipFile(io.BytesIO(r.content)) as bundle:
+            names = bundle.namelist()
+            assert len(names) == 3, names
+            assert "shot.png" in names and "shot (2).png" in names, names
+            assert bundle.read("shot.png") == b"PNG-" + bytes([0]) * 8
+            assert bundle.read("shot (2).png") == b"PNG-" + bytes([1]) * 8
+
+        # 非法 / 空 / 超量入参
+        for bad in ("abc", "", ",".join(str(i) for i in range(1, 302))):
+            r = await client.get("/api/files/archive", params={"ids": bad}, cookies=user_cookies)
+            assert r.status_code == 400, (bad[:20], r.status_code, r.text)
+
+        # 越权：管理员也打不了 tester 的文件
+        r = await client.get("/api/files/archive", params={"ids": str(arch_ids[0])}, cookies=cookies)
+        assert r.status_code == 404, r.text
+
+        # 体积上限兜底（把 size 改大模拟超过 1GB）
+        async with SessionLocal() as s:
+            row = await s.get(StoredFile, arch_ids[0])
+            row.size = 2 * 1024 * 1024 * 1024
+            await s.commit()
+        r = await client.get(
+            "/api/files/archive",
+            params={"ids": ",".join(str(i) for i in arch_ids)}, cookies=user_cookies,
+        )
+        assert r.status_code == 413, r.text
+        async with SessionLocal() as s:  # 还原，避免影响后续存储统计
+            row = await s.get(StoredFile, arch_ids[0])
+            row.size = 14
+            await s.commit()
+        print("✓ 打包下载：ZIP 内容与同名去重、非法/空/超量 400、越权 404、超限 413")
+
         # 管理端存储统计与手动清理接口
         r = await client.get("/api/admin/storage", cookies=cookies)
         assert r.status_code == 200 and "total_bytes" in r.json(), r.text

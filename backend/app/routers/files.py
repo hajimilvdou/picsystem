@@ -1,10 +1,17 @@
-"""用户文件：列表 / 下载 / 删除 / 标签。"""
+"""用户文件：列表 / 下载 / 缩略图 / 打包下载 / 删除 / 标签。"""
 from __future__ import annotations
+
+import os
+import re
+import tempfile
+import zipfile
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,6 +75,99 @@ async def list_files(
         q.order_by(StoredFile.created_at.desc()).offset((page - 1) * size).limit(size)
     )
     return {"total": total, "items": [_file_out(r) for r in result.scalars()]}
+
+
+ARCHIVE_MAX_FILES = 300
+ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024  # 单次打包的原始体积上限（1GB）
+
+
+def _parse_ids(raw: str) -> list[int]:
+    ids: list[int] = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            raise HTTPException(status_code=400, detail="ids 只能是以逗号分隔的数字")
+        ids.append(int(part))
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先选择要打包的文件")
+    if len(ids) > ARCHIVE_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"单次最多打包 {ARCHIVE_MAX_FILES} 个文件")
+    return list(dict.fromkeys(ids))
+
+
+def _zip_entry_name(name: str, used: set[str]) -> str:
+    """生成 zip 内的安全文件名：去掉路径分隔符、重名自动加序号。"""
+    safe = re.sub(r"[\\/]+", "_", str(name or "file")).lstrip(".") or "file"
+    if safe not in used:
+        used.add(safe)
+        return safe
+    stem, dot, suffix = safe.rpartition(".")
+    base, ext = (stem, f".{suffix}") if dot else (safe, "")
+    index = 2
+    while f"{base} ({index}){ext}" in used:
+        index += 1
+    final = f"{base} ({index}){ext}"
+    used.add(final)
+    return final
+
+
+def _build_archive(rows: list[StoredFile]) -> str:
+    """把产物写进临时 zip，返回临时文件路径（调用方负责在响应结束后删除）。"""
+    handle = tempfile.NamedTemporaryFile(prefix="picsystem-", suffix=".zip", delete=False)
+    handle.close()
+    used: set[str] = set()
+    with zipfile.ZipFile(handle.name, "w", zipfile.ZIP_STORED) as archive:
+        for row in rows:
+            try:
+                path = resolve_path(row.path)
+            except PermissionError:
+                continue
+            if not path.exists():
+                continue
+            archive.write(path, _zip_entry_name(row.filename, used))
+    return handle.name
+
+
+@router.get("/archive")
+async def archive(
+    ids: str = Query(default="", description="逗号分隔的文件 id"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把选中的产物打包成 zip 下载（只读操作，不动原件）。
+
+    用 GET + 逗号分隔 id：前端可以直接用 `<a download>` 触发浏览器原生下载，
+    不必把整个 zip 读进内存变成 blob（几百 MB 的包在低配客户端上会爆内存）。
+    实际体积上限由前端预检 + 后端兜底双重把关。
+    """
+    wanted = _parse_ids(ids)
+    result = await db.execute(
+        select(StoredFile).where(StoredFile.user_id == user.id, StoredFile.id.in_(wanted))
+    )
+    found = {row.id: row for row in result.scalars()}
+    rows = [found[file_id] for file_id in wanted if file_id in found]  # 保持选择顺序
+    if not rows:
+        raise HTTPException(status_code=404, detail="没有可打包的文件")
+    total = sum(int(row.size or 0) for row in rows)
+    if total > ARCHIVE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"选中的文件合计 {total / 1048576:.0f}MB，超过单次打包上限 "
+                   f"{ARCHIVE_MAX_BYTES // 1048576}MB，请分批下载",
+        )
+    zip_path = await run_in_threadpool(_build_archive, rows)
+    if not os.path.exists(zip_path):
+        raise HTTPException(status_code=500, detail="打包失败")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"picsystem-{stamp}.zip",
+        # 响应结束后立刻删掉临时包，避免堆积
+        background=BackgroundTask(lambda: os.unlink(zip_path) if os.path.exists(zip_path) else None),
+    )
 
 
 @router.get("/tags")

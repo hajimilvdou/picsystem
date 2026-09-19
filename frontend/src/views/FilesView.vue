@@ -53,13 +53,21 @@ async function loadTags() {
 function switchTab() {
   page.value = 1
   tagFilter.value = ''
+  selectedIds.value = []
   load()
   loadTags()
+}
+
+function changePage(next) {
+  page.value = next
+  selectedIds.value = []
+  load()
 }
 
 function pickTag(tag) {
   tagFilter.value = tagFilter.value === tag ? '' : tag
   page.value = 1
+  selectedIds.value = []
   load()
 }
 
@@ -103,6 +111,101 @@ function editInDraw(item) {
   router.push({ path: '/draw', query: { edit: String(item.id) } })
 }
 
+// ---- 多选 / 打包下载 / 批量删除 ----
+
+const ARCHIVE_MAX_FILES = 300
+const ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024
+
+const selectMode = ref(false)
+const selectedIds = ref([])
+
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  selectedIds.value = []
+}
+
+function isSelected(id) {
+  return selectedIds.value.includes(id)
+}
+
+function toggleSelect(id) {
+  selectedIds.value = isSelected(id)
+    ? selectedIds.value.filter((item) => item !== id)
+    : [...selectedIds.value, id]
+}
+
+function selectAllOnPage() {
+  selectedIds.value = items.value.map((f) => f.id)
+}
+
+function onTableSelection(rows) {
+  selectedIds.value = rows.map((row) => row.id)
+}
+
+function selectedFiles() {
+  return items.value.filter((f) => selectedIds.value.includes(f.id))
+}
+
+function archivePrecheck() {
+  const chosen = selectedFiles()
+  if (!chosen.length) {
+    ElMessage.warning('请先选择要下载的文件')
+    return null
+  }
+  if (chosen.length > ARCHIVE_MAX_FILES) {
+    ElMessage.warning(`单次最多打包 ${ARCHIVE_MAX_FILES} 个文件，当前选中 ${chosen.length} 个`)
+    return null
+  }
+  const total = chosen.reduce((sum, f) => sum + (f.size || 0), 0)
+  if (total > ARCHIVE_MAX_BYTES) {
+    ElMessage.warning(`选中的文件合计 ${(total / 1048576).toFixed(0)}MB，超过 1GB 上限，请分批下载`)
+    return null
+  }
+  return chosen
+}
+
+/** 用原生 <a download> 触发下载：zip 由浏览器直接写盘，不会把整包读进内存。 */
+function downloadArchive() {
+  const chosen = archivePrecheck()
+  if (!chosen) return
+  const link = document.createElement('a')
+  link.href = `/api/files/archive?ids=${chosen.map((f) => f.id).join(',')}`
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  ElMessage.success(`已开始打包下载 ${chosen.length} 个文件`)
+}
+
+async function removeSelected() {
+  const chosen = archivePrecheck()
+  if (!chosen) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${chosen.length} 个文件吗？删除后不可恢复。`,
+      '批量删除',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  let removed = 0
+  const failed = []
+  for (const item of chosen) {
+    try {
+      await api.del(`/api/files/${item.id}`)
+      removed += 1
+    } catch (e) {
+      failed.push(`${item.filename}：${e.message}`)
+    }
+  }
+  selectedIds.value = []
+  await load()
+  await loadTags()
+  if (failed.length) ElMessage.warning(`已删除 ${removed} 个，失败 ${failed.length} 个：${failed[0]}`)
+  else ElMessage.success(`已删除 ${removed} 个文件`)
+}
+
 onMounted(() => {
   load()
   loadTags()
@@ -134,12 +237,41 @@ onMounted(() => {
       <span v-if="!tagStats.length" class="text-muted" style="font-size: 12px">
         还没有标签，点图片右下角的标签图标即可添加
       </span>
+      <span class="toolbar-spacer"></span>
+      <template v-if="!selectMode">
+        <el-button size="small" @click="toggleSelectMode">多选</el-button>
+      </template>
+      <template v-else>
+        <span class="text-muted" style="font-size: 12px">已选 {{ selectedIds.length }} 个</span>
+        <el-button size="small" @click="selectAllOnPage">全选本页</el-button>
+        <el-button size="small" :disabled="!selectedIds.length" @click="selectedIds = []">清空</el-button>
+        <el-button size="small" type="primary" :disabled="!selectedIds.length" @click="downloadArchive">
+          打包下载
+        </el-button>
+        <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="removeSelected">
+          批量删除
+        </el-button>
+        <el-button size="small" @click="toggleSelectMode">退出多选</el-button>
+      </template>
     </div>
     <div v-loading="loading">
       <el-empty v-if="!items.length" :description="tagFilter ? `没有带「${tagFilter}」标签的文件` : '暂无文件'" />
       <template v-else>
         <div v-if="tab === 'image'" class="file-grid">
-          <div v-for="f in items" :key="f.id" class="file-cell">
+          <div
+            v-for="f in items"
+            :key="f.id"
+            class="file-cell"
+            :class="{ 'is-selected': selectMode && isSelected(f.id) }"
+            @click="selectMode && toggleSelect(f.id)"
+          >
+            <el-checkbox
+              v-if="selectMode"
+              class="file-cell-check"
+              :model-value="isSelected(f.id)"
+              @click.stop
+              @change="toggleSelect(f.id)"
+            />
             <el-image
               :src="thumbSrc(f)"
               fit="cover"
@@ -173,7 +305,8 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        <el-table v-else :data="items">
+        <el-table v-else :data="items" row-key="id" @selection-change="onTableSelection">
+          <el-table-column v-if="selectMode" type="selection" width="42" />
           <el-table-column prop="filename" label="文件名" min-width="200" show-overflow-tooltip />
           <el-table-column label="大小" width="110">
             <template #default="{ row }">{{ fmtSize(row.size) }}</template>
@@ -212,7 +345,7 @@ onMounted(() => {
           :page-size="20"
           :current-page="page"
           style="margin-top: 16px; justify-content: center"
-          @current-change="(p) => { page = p; load() }"
+          @current-change="changePage"
         />
       </template>
     </div>
@@ -250,6 +383,25 @@ onMounted(() => {
   margin-bottom: 14px;
 }
 
+.toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.file-cell.is-selected {
+  border-color: var(--el-color-primary, #409eff);
+  box-shadow: 0 0 0 1px var(--el-color-primary, #409eff) inset;
+}
+
+.file-cell-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .file-tags {
   display: flex;
   gap: 4px;
@@ -263,6 +415,8 @@ onMounted(() => {
   gap: 14px;
 }
 .file-cell {
+  position: relative;
+  cursor: default;
   border: 1px solid var(--ps-border);
   border-radius: 12px;
   overflow: hidden;
