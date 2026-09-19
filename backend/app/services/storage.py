@@ -57,6 +57,14 @@ def resolve_path(rel_path: str) -> Path:
 
 
 def delete_file(rel_path: str) -> None:
+    """删除产物文件及其缩略图。
+
+    这里是全项目删除产物的唯一收口点（用户删除 / 保留期清理 / 配额回滚 / 删用户），
+    缩略图挂在此处可保证不残留；用函数内导入避免与 thumbnails 形成循环依赖。
+    """
+    from .thumbnails import delete_thumbnail
+
+    delete_thumbnail(rel_path)
     try:
         path = resolve_path(rel_path)
         path.unlink(missing_ok=True)

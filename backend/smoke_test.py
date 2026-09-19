@@ -479,6 +479,63 @@ async def main() -> None:
         assert r.json()["total"] == 0, r.json()
         print("✓ 图库标签：清洗/去重/限量、精确筛选、聚合、越权拦截、清空")
 
+        # ---- 图片缩略图 ----
+        from PIL import Image as PILImage
+
+        from app.services.cleanup import cleanup_orphan_thumbs
+        from app.services.storage import data_root as file_data_root
+        from app.services.thumbnails import THUMB_EDGE, thumb_abs_path
+
+        big_rel = "files/test/big-photo.png"
+        big_abs = file_data_root() / big_rel
+        big_abs.parent.mkdir(parents=True, exist_ok=True)
+        PILImage.new("RGB", (1600, 900), (20, 120, 200)).save(big_abs)  # 16:9 大图
+        async with SessionLocal() as s:
+            tester = (await s.execute(select(User).where(User.username == "tester"))).scalar_one()
+            big_row = StoredFile(user_id=tester.id, kind="image", filename="big-photo.png",
+                                 path=big_rel, mime="image/png", size=big_abs.stat().st_size)
+            s.add(big_row)
+            await s.commit()
+            big_id = big_row.id
+
+        r = await client.get("/api/files", params={"kind": "image"}, cookies=user_cookies)
+        target = next(item for item in r.json()["items"] if item["id"] == big_id)
+        assert target["thumb_url"] == f"/api/files/{big_id}/thumb", target
+
+        # 按需生成并落盘：长边 400、JPEG、保持比例
+        thumb_file = thumb_abs_path(big_rel)
+        assert not thumb_file.exists(), "缩略图应当是首次请求时才生成"
+        r = await client.get(f"/api/files/{big_id}/thumb", cookies=user_cookies)
+        assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg", r.text
+        assert thumb_file.exists(), thumb_file
+        with PILImage.open(thumb_file) as im:
+            assert max(im.size) == THUMB_EDGE and im.size == (400, 225), im.size
+        # 不能落在 files/ 下，否则会被孤儿文件清理误删
+        assert (file_data_root() / "files") not in thumb_file.parents, thumb_file
+
+        # 越权访问拿不到缩略图
+        r = await client.get(f"/api/files/{big_id}/thumb", cookies=cookies)
+        assert r.status_code == 404, r.text
+
+        # 删除产物时缩略图必须一起消失
+        r = await client.delete(
+            f"/api/files/{big_id}",
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200, r.text
+        assert not thumb_file.exists(), "删除产物后缩略图仍残留"
+
+        # 孤儿缩略图（含生成中断的 .tmp）兜底清理
+        stale = thumb_abs_path("files/test/ghost.png")
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"stale")
+        (stale.parent / "half.jpg.tmp").write_bytes(b"half")
+        async with SessionLocal() as s:
+            removed_thumbs = await cleanup_orphan_thumbs(s)
+        assert removed_thumbs >= 2 and not stale.exists(), removed_thumbs
+        assert not (stale.parent / "half.jpg.tmp").exists()
+        print("✓ 图片缩略图：按需生成 400px JPEG、越权拦截、随产物删除、孤儿兜底清理")
+
         # 管理端存储统计与手动清理接口
         r = await client.get("/api/admin/storage", cookies=cookies)
         assert r.status_code == 200 and "total_bytes" in r.json(), r.text

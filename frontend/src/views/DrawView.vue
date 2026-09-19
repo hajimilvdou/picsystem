@@ -7,10 +7,12 @@ import { api } from '../api/client'
 import MaskEditor from '../components/MaskEditor.vue'
 import { useAuthStore } from '../stores/auth'
 import { fmtSize, fmtTime } from '../utils/format'
+import { useThumbFallback } from '../utils/thumbs'
 
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const { thumbSrc, onImageError } = useThumbFallback()
 const tab = ref('gen')
 const form = ref({ prompt: '', model: 'gpt-image-2', n: 1, size: 'auto', quality: 'auto' })
 const imageModels = ref(['gpt-image-2'])
@@ -260,7 +262,14 @@ onMounted(async () => {
           <template #header>本次生成</template>
           <div class="img-grid">
             <div v-for="f in results" :key="f.id" class="img-cell">
-              <el-image :src="f.url" fit="cover" class="img-thumb" :preview-src-list="[f.url]" preview-teleported />
+              <el-image
+                :src="thumbSrc(f)"
+                fit="cover"
+                class="img-thumb"
+                :preview-src-list="[f.url]"
+                preview-teleported
+                @error="onImageError(f)"
+              />
               <div class="img-actions">
                 <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>
                 <a :href="f.url" download><el-icon title="下载"><Download /></el-icon></a>
@@ -275,7 +284,14 @@ onMounted(async () => {
           <el-empty v-if="!history.length" description="还没有生成过图片" />
           <div v-else class="img-grid">
             <div v-for="f in history" :key="f.id" class="img-cell">
-              <el-image :src="f.url" fit="cover" class="img-thumb" :preview-src-list="[f.url]" preview-teleported />
+              <el-image
+                :src="thumbSrc(f)"
+                fit="cover"
+                class="img-thumb"
+                :preview-src-list="[f.url]"
+                preview-teleported
+                @error="onImageError(f)"
+              />
               <el-tooltip :content="`${f.prompt || '无提示词'} · ${fmtSize(f.size)} · ${fmtTime(f.created_at)}`">
                 <div class="img-actions">
                   <el-icon title="去局部编辑" @click="editAgain(f)"><EditPen /></el-icon>

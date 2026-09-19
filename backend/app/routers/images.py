@@ -28,7 +28,13 @@ MASK_FIELD = "mask"
 
 
 def _file_out(row) -> dict:
-    return {"id": row.id, "url": f"/api/files/{row.id}/download", "mime": row.mime, "size": row.size}
+    return {
+        "id": row.id,
+        "url": f"/api/files/{row.id}/download",
+        "thumb_url": f"/api/files/{row.id}/thumb",
+        "mime": row.mime,
+        "size": row.size,
+    }
 
 
 async def _read_image_part(upload: UploadFile, *, label: str, max_bytes: int) -> tuple[str, bytes, str]:

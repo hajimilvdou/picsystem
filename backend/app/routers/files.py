@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -11,6 +12,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..models import StoredFile, User
 from ..services.storage import delete_file, resolve_path
+from ..services.thumbnails import THUMBABLE_MIME, ensure_thumbnail
 from ..services.tags import (
     MAX_TAGS_PER_FILE,
     column_to_tags,
@@ -26,6 +28,8 @@ TAG_SCAN_LIMIT = 2000
 
 
 def _file_out(row: StoredFile) -> dict:
+    # 图片类才给缩略图地址；取不到时前端回退到原图
+    thumb_url = f"/api/files/{row.id}/thumb" if row.mime in THUMBABLE_MIME else None
     return {
         "id": row.id,
         "kind": row.kind,
@@ -35,6 +39,7 @@ def _file_out(row: StoredFile) -> dict:
         "prompt": row.prompt,
         "tags": column_to_tags(row.tags),
         "url": f"/api/files/{row.id}/download",
+        "thumb_url": thumb_url,
         "created_at": row.created_at,
     }
 
@@ -111,6 +116,27 @@ async def update_tags(
     row.tags = tags_to_column(tags)
     await db.commit()
     return {"ok": True, "id": row.id, "tags": tags}
+
+
+@router.get("/{file_id}/thumb")
+async def thumbnail(file_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """缩略图（长边 400px 的 JPEG）。首次请求时生成并落盘缓存，失败则 404 让前端回退原图。"""
+    row = await _get_own_file(db, user.id, file_id)
+    if row.mime not in THUMBABLE_MIME:
+        raise HTTPException(status_code=404, detail="该文件没有缩略图")
+    try:
+        source = resolve_path(row.path)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="文件不存在") from None
+    # 解码属于 CPU 密集操作，放到线程池，避免阻塞事件循环
+    dest = await run_in_threadpool(ensure_thumbnail, source, row.path)
+    if dest is None:
+        raise HTTPException(status_code=404, detail="缩略图不可用")
+    return FileResponse(
+        dest,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=604800"},
+    )
 
 
 @router.get("/{file_id}/download")

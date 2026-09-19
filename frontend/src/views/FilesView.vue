@@ -5,8 +5,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Delete, EditPen, PriceTag } from '@element-plus/icons-vue'
 import { api } from '../api/client'
 import { fmtSize, fmtTime } from '../utils/format'
+import { useThumbFallback } from '../utils/thumbs'
 
 const router = useRouter()
+const { thumbSrc, onImageError } = useThumbFallback()
 
 const tab = ref('image')
 const items = ref([])
@@ -138,7 +140,15 @@ onMounted(() => {
       <template v-else>
         <div v-if="tab === 'image'" class="file-grid">
           <div v-for="f in items" :key="f.id" class="file-cell">
-            <el-image :src="f.url" fit="cover" style="width: 100%; aspect-ratio: 1" :preview-src-list="[f.url]" preview-teleported />
+            <el-image
+              :src="thumbSrc(f)"
+              fit="cover"
+              lazy
+              style="width: 100%; aspect-ratio: 1"
+              :preview-src-list="[f.url]"
+              preview-teleported
+              @error="onImageError(f)"
+            />
             <div class="file-meta">
               <div v-if="f.tags && f.tags.length" class="file-tags">
                 <el-tag

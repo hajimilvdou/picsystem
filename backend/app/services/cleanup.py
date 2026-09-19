@@ -17,6 +17,7 @@ from ..database import SessionLocal
 from ..models import AuditLog, RiskEvent, StoredFile, UsageLog, UserSession
 from .settings_store import get_setting
 from .storage import data_root, delete_file
+from .thumbnails import thumb_abs_path, thumbs_root
 
 logger = logging.getLogger("picsystem.cleanup")
 
@@ -135,6 +136,38 @@ async def _find_orphans(session: AsyncSession, files_root) -> list:
     return orphans
 
 
+async def cleanup_orphan_thumbs(session: AsyncSession) -> int:
+    """清理 `thumbs/` 下没有对应产物的残留缩略图。
+
+    正常路径下删除产物时会连带删缩略图（见 storage.delete_file），这里是崩溃/异常后的兜底。
+    做法：以数据库中的产物路径推导出「应有的缩略图集合」，删掉集合外的文件；
+    顺带清掉生成中断留下的 `.tmp`。只记日志，不影响 `cleanup_orphan_files` 的既有返回值。
+    """
+    root = thumbs_root()
+    if not root.exists():
+        return 0
+    rows = await session.execute(select(StoredFile.path))
+    expected = {thumb_abs_path(rel) for (rel,) in rows.all() if rel}
+    removed = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        stale_tmp = path.suffix == ".tmp"
+        if not stale_tmp and path in expected:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    for directory in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 async def count_orphan_files(session: AsyncSession) -> tuple[int, int]:
     """只读统计孤儿文件数量与体积，供管理端预览可清理空间。"""
     files_root = data_root() / "files"
@@ -184,8 +217,10 @@ async def run_cleanup() -> dict:
                 expired = await cleanup_files(session, retention_hours)
                 logs = await cleanup_logs(session, log_hours, audit_days)
                 orphans = await cleanup_orphan_files(session)
+                orphan_thumbs = await cleanup_orphan_thumbs(session)
                 sessions = await cleanup_sessions(session)
-                stats = {"expired_files": expired, "orphan_files": orphans, "sessions": sessions, **logs}
+                stats = {"expired_files": expired, "orphan_files": orphans,
+                         "orphan_thumbs": orphan_thumbs, "sessions": sessions, **logs}
                 if any(stats.values()):
                     logger.info("自动清理完成：%s", stats)
                 return stats
