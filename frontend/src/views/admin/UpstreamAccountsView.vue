@@ -107,6 +107,23 @@ async function syncAll() {
   }
 }
 
+// 单账号检测：重新拉取该账号的套餐 / 额度 / Token 状态（等价老面板的"检测"）
+async function syncOne(row) {
+  row._syncing = true
+  try {
+    const data = await api.post('/api/admin/upstream-accounts/sync', { account_ids: [row.id] })
+    if (data.progress_id) pollProgress(data.progress_id, '检测完成')
+    else {
+      ElMessage.success('检测已触发')
+      load()
+    }
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    row._syncing = false
+  }
+}
+
 function pollProgress(progressId, doneText) {
   clearTimeout(pollTimer)
   const tick = async () => {
@@ -127,7 +144,8 @@ function pollProgress(progressId, doneText) {
 
 function fmtTs(v) {
   if (!v) return '-'
-  return new Date(v * 1000).toLocaleString('zh-CN', { hour12: false })
+  const d = new Date(Number(v) * 1000)
+  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN', { hour12: false })
 }
 
 onMounted(load)
@@ -160,18 +178,28 @@ onUnmounted(() => clearTimeout(pollTimer))
         <el-table-column label="账号" min-width="200">
           <template #default="{ row }">
             <div>{{ row.email || row.user_id || row.id }}</div>
-            <div class="text-muted" style="font-size: 12px">{{ row.plan_label }} · {{ row.source_label }}</div>
+            <div class="text-muted" style="font-size: 12px">
+              {{ row.plan_label }} · {{ row.source_label }}{{ row.group_name ? ` · ${row.group_name}` : '' }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.status_tone === 'success' ? 'success' : row.status_tone === 'warning' ? 'warning' : row.status_tone === 'error' ? 'danger' : 'info'" size="small">
-              {{ row.status_label }}
-            </el-tag>
+            <el-tooltip :disabled="!row.status_reason" :content="row.status_reason">
+              <el-tag :type="row.status_tone === 'success' ? 'success' : row.status_tone === 'warning' ? 'warning' : row.status_tone === 'error' ? 'danger' : 'info'" size="small">
+                {{ row.status_label }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="绘图额度" width="90">
-          <template #default="{ row }">{{ row.quota_label }}</template>
+        <el-table-column label="绘图额度" width="110">
+          <template #default="{ row }">
+            <div>{{ row.quota_label }}</div>
+            <div v-if="row.image_inflight || row.quota_reset_at" class="text-muted" style="font-size: 12px">
+              <span v-if="row.image_inflight">在途 {{ row.image_inflight }}</span>
+              <span v-if="row.quota_reset_at">{{ row.image_inflight ? ' · ' : '' }}重置 {{ fmtTs(row.quota_reset_at) }}</span>
+            </div>
+          </template>
         </el-table-column>
         <el-table-column label="AT / RT" width="140">
           <template #default="{ row }">
@@ -187,8 +215,9 @@ onUnmounted(() => clearTimeout(pollTimer))
         <el-table-column label="最近使用" width="150">
           <template #default="{ row }">{{ fmtTs(row.last_used_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" text type="primary" :loading="row._syncing" @click="syncOne(row)">检测</el-button>
             <el-button size="small" text :type="row.enabled ? 'warning' : 'success'" @click="batch(row, row.enabled ? 'disable' : 'enable')">
               {{ row.enabled ? '禁用' : '启用' }}
             </el-button>
