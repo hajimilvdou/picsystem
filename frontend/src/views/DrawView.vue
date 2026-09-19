@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Delete, EditPen } from '@element-plus/icons-vue'
@@ -37,6 +37,16 @@ watch(inpaintFiles, (files) => {
 const editModeHint = computed(() =>
   refFiles.value.length > 1 ? '多图参考：融合多张图的内容' : '单图生图：按指令重绘整张图（与整图编辑等价）',
 )
+
+const promptPlaceholder = computed(() => {
+  if (tab.value === 'inpaint') return '描述涂抹区域要重绘成什么，例如：把涂掉的地方改成木质桌面'
+  if (tab.value === 'edit') return '描述如何修改这张图，例如：把背景换成海边日落'
+  return '描述你想要的画面，例如：一只漂浮在太空里的猫，电影感光影'
+})
+
+onBeforeUnmount(() => {
+  if (inpaintPreviewUrl.value) URL.revokeObjectURL(inpaintPreviewUrl.value)
+})
 
 const history = ref([])
 const historyTotal = ref(0)
@@ -194,7 +204,7 @@ onMounted(async () => {
                 :rows="4"
                 maxlength="4000"
                 show-word-limit
-                placeholder="描述你想要的画面，例如：一只漂浮在太空里的猫，电影感光影"
+                :placeholder="promptPlaceholder"
               />
             </el-form-item>
             <el-form-item v-if="tab === 'edit'" label="参考图（1-4 张）">

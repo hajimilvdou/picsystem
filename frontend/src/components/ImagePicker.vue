@@ -27,7 +27,8 @@ function syncPreviews(files) {
   previews.value = (files || []).map((file) => ({ file, url: URL.createObjectURL(file) }))
 }
 
-watch(() => props.modelValue, syncPreviews, { immediate: true })
+// deep：父组件若原地 push 也能刷新（正常用法是整组替换）
+watch(() => props.modelValue, syncPreviews, { immediate: true, deep: true })
 onBeforeUnmount(() => previews.value.forEach((item) => URL.revokeObjectURL(item.url)))
 
 function pick() {
@@ -38,18 +39,26 @@ function pick() {
 function onFiles(event) {
   const incoming = Array.from(event.target.files || [])
   event.target.value = ''
-  const next = [...props.modelValue]
+  let next = [...props.modelValue]
+  let replaced = false
   for (const file of incoming) {
     if (!file.type.startsWith('image/')) {
       ElMessage.warning(`已跳过非图片文件：${file.name}`)
       continue
     }
     if (next.length >= props.max) {
+      // 单图场景（如图片编辑页）选新图 = 直接替换，否则用户会卡在「先删再加」
+      if (props.max === 1) {
+        next = [file]
+        replaced = true
+        continue
+      }
       ElMessage.warning(`最多 ${props.max} 张图片`)
       break
     }
     next.push(file)
   }
+  if (replaced) ElMessage.success('已替换图片')
   emit('update:modelValue', next)
 }
 

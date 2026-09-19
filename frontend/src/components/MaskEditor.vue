@@ -47,6 +47,33 @@ function reset() {
   emit('change', null)
 }
 
+function canvasBlob(source) {
+  return new Promise((resolve) => source.toBlob(resolve, 'image/png'))
+}
+
+/**
+ * 判断画布上是否真的存在「白色涂抹区」。
+ * 橡皮擦涂黑也会把 painted 置真，若不复查，用户涂完又全擦掉时会把
+ * 一张全黑遮罩发出去（上游可能报错或产出无意义结果）。
+ * 降采样到 64px 再检查：只回答「有没有白」，成本可忽略。
+ */
+function hasWhiteArea() {
+  const canvas = canvasRef.value
+  if (!canvas) return false
+  const sample = document.createElement('canvas')
+  const scale = Math.min(1, 64 / Math.max(canvas.width, canvas.height))
+  sample.width = Math.max(1, Math.round(canvas.width * scale))
+  sample.height = Math.max(1, Math.round(canvas.height * scale))
+  const ctx = sample.getContext('2d')
+  if (!ctx) return painted.value
+  ctx.drawImage(canvas, 0, 0, sample.width, sample.height)
+  const { data } = ctx.getImageData(0, 0, sample.width, sample.height)
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] > 8) return true
+  }
+  return false
+}
+
 function loadImage(url) {
   ready.value = false
   loadError.value = ''
@@ -132,18 +159,20 @@ function onPointerUp(event) {
 
 async function syncMask() {
   const canvas = canvasRef.value
-  if (!canvas || !painted.value) {
+  if (!canvas || !hasWhiteArea()) {
+    painted.value = false
     emit('change', null)
     return
   }
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+  painted.value = true
+  const blob = await canvasBlob(canvas)
   emit('change', blob ?? null)
 }
 
 async function getMaskFile() {
   const canvas = canvasRef.value
-  if (!canvas || !painted.value) return null
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+  if (!canvas || !hasWhiteArea()) return null
+  const blob = await canvasBlob(canvas)
   return blob ? new File([blob], 'mask.png', { type: 'image/png' }) : null
 }
 
