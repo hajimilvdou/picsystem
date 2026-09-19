@@ -177,6 +177,92 @@ function downloadArchive() {
   ElMessage.success(`已开始打包下载 ${chosen.length} 个文件`)
 }
 
+// ---- 图片压缩（不可逆，先干跑预估再确认） ----
+
+const COMPRESSIBLE_MIME = ['image/png', 'image/jpeg', 'image/webp']
+const COMPRESS_BATCH_MAX = 50
+const qualityOptions = [
+  { label: '高质量（88）', value: 88 },
+  { label: '标准（82）', value: 82 },
+  { label: '高压缩（70）', value: 70 },
+]
+
+const compressQuality = ref(82)
+const compressing = ref(false)
+
+async function compressSelected() {
+  const chosen = selectedFiles().filter((f) => COMPRESSIBLE_MIME.includes(f.mime))
+  if (!chosen.length) {
+    ElMessage.warning('选中的文件里没有可压缩的图片（仅支持 PNG / JPEG / WebP）')
+    return
+  }
+  if (chosen.length > COMPRESS_BATCH_MAX) {
+    ElMessage.warning(`单次最多压缩 ${COMPRESS_BATCH_MAX} 张，请分批操作`)
+    return
+  }
+  compressing.value = true
+  try {
+    // 1) 干跑预估：不写盘，先把收益算清楚给用户看
+    let before = 0
+    let after = 0
+    const worthwhile = []
+    for (const item of chosen) {
+      try {
+        const preview = await api.post(`/api/files/${item.id}/compress`, { quality: compressQuality.value })
+        before += preview.before_bytes
+        after += preview.after_bytes
+        if (preview.worthwhile) worthwhile.push(item)
+      } catch {
+        /* 单张预估失败先跳过，正式压缩时再单独报错 */
+      }
+    }
+    if (!worthwhile.length) {
+      ElMessage.info('这些图片压缩后不会更小，已跳过（原文件未改动）')
+      return
+    }
+    const percent = before ? Math.round((1 - after / before) * 100) : 0
+    try {
+      await ElMessageBox.confirm(
+        `将压缩 ${worthwhile.length} 张图片：约 ${fmtSize(before)} → ${fmtSize(after)}（约省 ${percent}%）。`
+        + '压缩会把原文件替换为 WebP 且不可恢复，请确认已完成需要的下载备份。',
+        '压缩图片（不可逆）',
+        { type: 'warning', confirmButtonText: '确认压缩', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+
+    // 2) 正式压缩
+    let done = 0
+    let saved = 0
+    const failed = []
+    for (const item of worthwhile) {
+      try {
+        const result = await api.post(`/api/files/${item.id}/compress`, {
+          dry_run: false,
+          quality: compressQuality.value,
+        })
+        if (result.ok) {
+          done += 1
+          saved += result.saved_bytes
+        }
+      } catch (e) {
+        failed.push(`${item.filename}：${e.message}`)
+      }
+    }
+    selectedIds.value = []
+    await load()
+    await loadTags()
+    if (failed.length) {
+      ElMessage.warning(`已压缩 ${done} 张、省下 ${fmtSize(saved)}；失败 ${failed.length} 张：${failed[0]}`)
+    } else {
+      ElMessage.success(`已压缩 ${done} 张，省下 ${fmtSize(saved)}`)
+    }
+  } finally {
+    compressing.value = false
+  }
+}
+
 async function removeSelected() {
   const chosen = archivePrecheck()
   if (!chosen) return
@@ -245,6 +331,17 @@ onMounted(() => {
         <span class="text-muted" style="font-size: 12px">已选 {{ selectedIds.length }} 个</span>
         <el-button size="small" @click="selectAllOnPage">全选本页</el-button>
         <el-button size="small" :disabled="!selectedIds.length" @click="selectedIds = []">清空</el-button>
+        <el-select v-model="compressQuality" size="small" style="width: 132px" :disabled="compressing">
+          <el-option v-for="q in qualityOptions" :key="q.value" :label="q.label" :value="q.value" />
+        </el-select>
+        <el-button
+          size="small"
+          :loading="compressing"
+          :disabled="!selectedIds.length"
+          @click="compressSelected"
+        >
+          压缩图片
+        </el-button>
         <el-button size="small" type="primary" :disabled="!selectedIds.length" @click="downloadArchive">
           打包下载
         </el-button>

@@ -1,4 +1,4 @@
-"""用户文件：列表 / 下载 / 缩略图 / 打包下载 / 删除 / 标签。"""
+"""用户文件：列表 / 下载 / 缩略图 / 压缩 / 打包下载 / 删除 / 标签。"""
 from __future__ import annotations
 
 import os
@@ -18,6 +18,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import StoredFile, User
+from ..services.image_compress import (
+    COMPRESSIBLE_MIME,
+    DEFAULT_QUALITY,
+    MAX_MAX_EDGE,
+    MAX_QUALITY,
+    MAX_SOURCE_BYTES as MAX_COMPRESS_SOURCE_BYTES,
+    MIN_MAX_EDGE,
+    MIN_QUALITY,
+    OUTPUT_MIME,
+    CompressError,
+    compress,
+    output_filename,
+    output_rel_path,
+)
 from ..services.storage import delete_file, resolve_path
 from ..services.thumbnails import THUMBABLE_MIME, ensure_thumbnail
 from ..services.tags import (
@@ -128,6 +142,98 @@ def _build_archive(rows: list[StoredFile]) -> str:
                 continue
             archive.write(path, _zip_entry_name(row.filename, used))
     return handle.name
+
+
+class CompressIn(BaseModel):
+    """压缩参数。dry_run 默认为真：不传 false 就只做预估，不会动原文件。"""
+
+    quality: int = Field(default=DEFAULT_QUALITY, ge=MIN_QUALITY, le=MAX_QUALITY)
+    max_edge: int | None = Field(default=None, ge=MIN_MAX_EDGE, le=MAX_MAX_EDGE)
+    dry_run: bool = True
+
+
+@router.post("/{file_id}/compress")
+async def compress_file(
+    file_id: int,
+    body: CompressIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把图片压缩为 WebP（**不可逆**：会替换原文件）。
+
+    dry_run=True（默认）只返回预估大小，不写盘；前端展示预估、用户确认后再传 false。
+    """
+    row = await _get_own_file(db, user.id, file_id)
+    if row.mime not in COMPRESSIBLE_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail="该文件类型不支持压缩（GIF 重编码会丢动画，PPT / PSD / PDF 不处理）",
+        )
+    try:
+        source = resolve_path(row.path)
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="文件不存在") from None
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="文件已被清理")
+    source_bytes = source.stat().st_size
+    before = int(row.size or 0) or source_bytes
+    if source_bytes > MAX_COMPRESS_SOURCE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"原图超过 {MAX_COMPRESS_SOURCE_BYTES // 1048576}MB，不压缩",
+        )
+
+    try:
+        result = await run_in_threadpool(compress, source, quality=body.quality, max_edge=body.max_edge)
+    except CompressError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    after = result.size
+    payload = {
+        "id": row.id,
+        "dry_run": body.dry_run,
+        "before_bytes": before,
+        "after_bytes": after,
+        "saved_bytes": max(0, before - after),
+        "saved_ratio": round(max(0, before - after) / before, 4) if before else 0.0,
+        "width": result.width,
+        "height": result.height,
+        "quality": body.quality,
+    }
+    if body.dry_run:
+        payload["worthwhile"] = after < before
+        return payload
+
+    if after >= before:
+        payload["ok"] = False
+        payload["skipped_reason"] = "压缩后体积反而更大，已跳过（原文件未改动）"
+        return payload
+
+    old_rel = row.path
+    new_rel = output_rel_path(old_rel)
+    try:
+        target = resolve_path(new_rel)
+    except PermissionError:
+        raise HTTPException(status_code=500, detail="目标路径非法") from None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f"{target.name}.tmp")
+        tmp.write_bytes(result.content)
+        tmp.replace(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"写入压缩结果失败：{exc}") from exc
+
+    # 原文件与它的缩略图一起清理；新路径的缩略图会在下次访问时按需重建
+    delete_file(old_rel)
+    row.path = new_rel
+    row.mime = OUTPUT_MIME
+    row.filename = output_filename(row.filename)
+    row.size = after
+    await db.commit()
+    payload["ok"] = True
+    payload["mime"] = OUTPUT_MIME
+    payload["filename"] = row.filename
+    return payload
 
 
 @router.get("/archive")

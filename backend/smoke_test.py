@@ -593,6 +593,89 @@ async def main() -> None:
             await s.commit()
         print("✓ 打包下载：ZIP 内容与同名去重、非法/空/超量 400、越权 404、超限 413")
 
+        # ---- 图片压缩（干跑 → 确认 → 落盘，替换为 WebP） ----
+        import random
+
+        noise_rel = "files/test/noise.png"
+        noise_abs = file_data_root() / noise_rel
+        noise_abs.parent.mkdir(parents=True, exist_ok=True)
+        random.seed(7)
+        noise = PILImage.new("RGB", (600, 400))
+        noise.putdata([(random.randrange(256), random.randrange(256), random.randrange(256))
+                       for _ in range(600 * 400)])
+        noise.save(noise_abs)  # 噪声 PNG 几乎不可压缩，适合验证压缩收益
+        async with SessionLocal() as s:
+            tester = (await s.execute(select(User).where(User.username == "tester"))).scalar_one()
+            noise_row = StoredFile(user_id=tester.id, kind="image", filename="noise.png",
+                                   path=noise_rel, mime="image/png", size=noise_abs.stat().st_size)
+            gif_row = StoredFile(user_id=tester.id, kind="image", filename="anim.gif",
+                                 path="files/test/anim.gif", mime="image/gif", size=10)
+            deck_row = StoredFile(
+                user_id=tester.id, kind="ppt", filename="deck.pptx", path="files/test/deck.pptx", size=10,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+            s.add_all([noise_row, gif_row, deck_row])
+            await s.commit()
+            noise_id, gif_id, deck_id = noise_row.id, gif_row.id, deck_row.id
+            original_png_bytes = noise_abs.stat().st_size
+
+        # 先摸一次缩略图，用于验证压缩后旧缩略图被清理
+        assert (await client.get(f"/api/files/{noise_id}/thumb", cookies=user_cookies)).status_code == 200
+        thumb_before = thumb_abs_path(noise_rel)
+        assert thumb_before.exists()
+
+        # 默认 dry_run：只预估，不动原文件
+        r = await client.post(
+            f"/api/files/{noise_id}/compress", json={},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200, r.text
+        preview = r.json()
+        assert preview["dry_run"] is True and preview["worthwhile"] is True, preview
+        assert 0 < preview["after_bytes"] < preview["before_bytes"], preview
+        assert noise_abs.exists() and noise_abs.stat().st_size == original_png_bytes
+        async with SessionLocal() as s:
+            row = await s.get(StoredFile, noise_id)
+            assert row.mime == "image/png" and row.size == original_png_bytes, row.mime
+
+        # 确认落盘
+        r = await client.post(
+            f"/api/files/{noise_id}/compress", json={"dry_run": False, "quality": 80},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        done = r.json()
+        assert done["mime"] == "image/webp" and done["filename"].endswith(".webp"), done
+        async with SessionLocal() as s:
+            row = await s.get(StoredFile, noise_id)
+            assert row.mime == "image/webp" and row.path.endswith(".webp"), (row.mime, row.path)
+            assert row.size == done["after_bytes"] and row.size < original_png_bytes, row.size
+            compressed_rel = row.path
+        assert (file_data_root() / compressed_rel).exists(), "压缩后的新文件不存在"
+        assert not noise_abs.exists(), "原 PNG 未清理"
+        assert not thumb_before.exists(), "旧缩略图未随原文件清理"
+        r = await client.get(f"/api/files/{noise_id}/download", cookies=user_cookies)
+        assert r.status_code == 200 and r.headers["content-type"] == "image/webp", r.text
+
+        # 不支持的类型 / 越权 / 参数越界
+        for target_id in (gif_id, deck_id):
+            r = await client.post(
+                f"/api/files/{target_id}/compress", json={"dry_run": False},
+                headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+            )
+            assert r.status_code == 400, r.text
+        r = await client.post(
+            f"/api/files/{noise_id}/compress", json={"dry_run": False},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=cookies,
+        )
+        assert r.status_code == 404, r.text
+        r = await client.post(
+            f"/api/files/{noise_id}/compress", json={"quality": 200},
+            headers={"x-requested-with": "XMLHttpRequest"}, cookies=user_cookies,
+        )
+        assert r.status_code == 422, r.text
+        print("✓ 图片压缩：默认干跑不改文件、确认后转 WebP 并清旧缩略图、类型/越权/参数校验")
+
         # 管理端存储统计与手动清理接口
         r = await client.get("/api/admin/storage", cookies=cookies)
         assert r.status_code == 200 and "total_bytes" in r.json(), r.text
