@@ -52,12 +52,19 @@ duration_ms / destructive`。
 失败即中止：迁移抛异常 → 事务回滚 → `init_db` 抛出 → 容器启动失败。
 **宁可起不来，也不带着半截表结构对外服务。**
 
+> ⚠️ 长迁移与健康检查：`api` 的 healthcheck 是 `start_period 20s` + 最多 10 次 × 15s，
+> 即迁移若超过约 2.5 分钟，容器会被判定为 unhealthy（虽然迁移仍在跑）。
+> 涉及大表回填时请分批次写，或临时把 `docker-compose.yml` 里 api 的
+> `healthcheck.start_period` 调大再升级。
+
 ## 3. 新增一条迁移
 
 ### 步骤
 
 1. 新增文件 `backend/app/migrations/versions/m<4位序号>_<小写下划线名称>.py`
    （序号递增且全局唯一，例：`m0003_add_user_language.py`）
+   > 命名必须严格匹配。若写成 `m3_xxx.py` 这类"像迁移但格式不对"的文件，
+   > 启动时会**直接报错**（而不是静默跳过）——避免出现「写了迁移却没执行」的隐性事故。
 2. 写 `DESCRIPTION`、按需写 `DESTRUCTIVE`、实现 `apply(ctx)`
 3. 跑 `cd backend && python smoke_test.py` 回归
 4. **不要**修改已发布的迁移文件（见第 4 节铁律）

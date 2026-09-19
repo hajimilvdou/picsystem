@@ -151,8 +151,19 @@ def load_migrations() -> list[Migration]:
 
     found: dict[str, Migration] = {}
     for module_info in pkgutil.iter_modules(versions.__path__):
-        matched = _MODULE_PATTERN.match(module_info.name)
+        module_name = module_info.name
+        matched = _MODULE_PATTERN.match(module_name)
         if not matched:
+            if module_info.ispkg or module_name == "__init__":
+                continue  # 子包不是迁移
+            if module_name.startswith("m") and module_name[1:2].isdigit():
+                # 形如 m3_xxx / m0003-add-xxx 明显想当迁移，但不符合命名规范。
+                # 静默跳过会变成「写了迁移却没执行」的隐性事故，这里直接报错。
+                raise MigrationError(
+                    f"versions/{module_name}.py 命名不符合规范，应为 "
+                    f"m<4位序号>_<小写名称>.py（例如 m0003_add_user_language.py）"
+                )
+            log.warning("versions/%s.py 不是迁移脚本（命名不匹配），已忽略", module_name)
             continue
         number, name = matched.group(1), matched.group(2)
         module = importlib.import_module(f"{versions.__name__}.{module_info.name}")

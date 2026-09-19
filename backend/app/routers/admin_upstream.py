@@ -66,6 +66,9 @@ _IMPORT_JOB_FIELDS = {
 }
 
 _MUTATION_FIELDS = {
+    # progress_id 是异步写操作（batch-update / delete / sync）的轮询凭据，前端靠它拉进度；
+    # 漏掉会让这些操作"点了没反应"（见 docs/UPSTREAM-ADMIN-API.md §1.1）
+    "progress_id",
     "added", "skipped", "synced", "updated", "removed", "refreshed", "checked", "abnormal",
     "updated_ids", "removed_ids", "target_ids",
     "total", "processed", "done", "status_label", "tone", "message", "summary_items",

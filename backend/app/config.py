@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import secrets
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 迁移相关默认值（.env 里写了键但留空时回落到这里，见下面的校验器）
+DEFAULT_MIGRATIONS_LOCK_TIMEOUT = 120.0
+DEFAULT_MIGRATIONS_SKIP_DESTRUCTIVE = False
 
 
 class Settings(BaseSettings):
@@ -45,9 +50,25 @@ class Settings(BaseSettings):
 
     # 数据库迁移（详见 docs/MIGRATIONS.md）
     # 多实例部署时等待迁移锁的上限（秒）
-    migrations_lock_timeout_seconds: float = 120.0
+    migrations_lock_timeout_seconds: float = DEFAULT_MIGRATIONS_LOCK_TIMEOUT
     # 置 true 时跳过标记为破坏性的迁移（删表 / 删列），谨慎使用
-    migrations_skip_destructive: bool = False
+    migrations_skip_destructive: bool = DEFAULT_MIGRATIONS_SKIP_DESTRUCTIVE
+
+    # `.env` 里写了键但没填值（`KEY=`）时回落到默认值：否则空字符串会让 pydantic
+    # 直接校验失败、应用启动即崩——对「取消注释照着填」的运维习惯来说这个坑代价太大。
+    @field_validator("migrations_lock_timeout_seconds", mode="before")
+    @classmethod
+    def _lock_timeout_blank(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_MIGRATIONS_LOCK_TIMEOUT
+        return value
+
+    @field_validator("migrations_skip_destructive", mode="before")
+    @classmethod
+    def _skip_destructive_blank(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_MIGRATIONS_SKIP_DESTRUCTIVE
+        return value
 
 
 settings = Settings()

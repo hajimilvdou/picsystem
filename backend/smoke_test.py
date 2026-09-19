@@ -600,6 +600,34 @@ async def main() -> None:
             assert r.status_code == 400, (bad_body, r.status_code, r.text)
         print("✓ 上游账号导入参数校验生效")
 
+        # 响应白名单投影：既要保留前端依赖的字段，又不能把凭据透出去
+        from app.routers.admin_upstream import _project_import_job, _project_mutation
+
+        mutation = _project_mutation(
+            {
+                "progress_id": "p-123",           # 前端靠它轮询异步任务，漏了会"点了没反应"
+                "target_ids": ["a1"],
+                "errors": [{"id": "a1", "message": "boom", "token": "SECRET"}],
+                "items": [{"id": "a1", "email": "e@x.com", "access_token": "SECRET"}],
+                "secret_key": "SECRET",
+            }
+        )
+        assert mutation["progress_id"] == "p-123" and mutation["target_ids"] == ["a1"], mutation
+        assert "access_token" not in mutation["items"][0], mutation["items"]
+        assert "secret_key" not in mutation, mutation
+        assert "token" not in mutation["errors"][0], mutation["errors"]
+
+        job = _project_import_job(
+            {
+                "job_id": "j1", "status": "running", "stage_label": "读取凭据", "terminal": False,
+                "progress_total": 10, "progress_completed": 3, "result_message": "", "result_tone": "info",
+                "secret_key": "SECRET", "password": "SECRET",
+            }
+        )
+        assert job["progress_total"] == 10 and job["terminal"] is False and job["stage_label"] == "读取凭据", job
+        assert "secret_key" not in job and "password" not in job, job
+        print("✓ 上游响应投影：保留前端依赖字段且不下发凭据")
+
         # ---- 双池额度 / 签到 / 审批 / 内容钩子 / 批量 / 公告 ----
         from app.services.quota import compute_temp_expiry, consume, get_quotas, grant, remaining
         from app.services.checkin import do_checkin
@@ -935,6 +963,23 @@ async def main() -> None:
 
     assert (await run_migrations(legacy_engine)).applied == []
     print("✓ 迁移：重复执行幂等，不会重复改结构")
+
+    # 命名不合规的迁移文件必须直接报错，而不是被静默跳过
+    from app.migrations import MigrationError
+    from app.migrations import versions as migrations_versions
+
+    # 用包路径定位，避免依赖测试脚本自身位置
+    bad_migration = Path(migrations_versions.__path__[0]) / "m3_bad_name.py"
+    bad_migration.write_text('DESCRIPTION = "bad"\n\n\ndef apply(ctx):\n    pass\n', encoding="utf-8")
+    try:
+        load_migrations()
+        raise AssertionError("命名不合规的迁移文件没有被拦截")
+    except MigrationError as exc:
+        assert "m3_bad_name" in str(exc), exc
+    finally:
+        bad_migration.unlink(missing_ok=True)
+    assert all(m.name != "bad_name" for m in load_migrations())
+    print("✓ 迁移：命名不合规的文件被拦截（不会静默漏跑）")
 
     async with legacy_engine.begin() as conn:
         await conn.execute(sa_text("UPDATE schema_migrations SET checksum = 'tampered' WHERE id = '0001'"))

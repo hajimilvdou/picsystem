@@ -838,7 +838,7 @@ async function pollOperation(progressId, doneText) {
   clearPoll()
   const tick = async () => {
     try {
-      const data = await api.get(`/api/admin/upstream-accounts/operations/${progressId}`)
+      const data = await api.get(`/api/admin/upstream-accounts/operations/${encodeURIComponent(progressId)}`)
       if (data.done) {
         const failed = data.result?.errors?.length || 0
         const message = data.message || data.status_label || doneText
@@ -861,7 +861,10 @@ async function batch(accountIds, operation, label) {
   try {
     const data = await api.post('/api/admin/upstream-accounts/batch', { account_ids: accountIds, operation })
     if (data.progress_id) pollOperation(data.progress_id, `${label}完成`)
-    else await load()
+    else {
+      ElMessage.success(`${label}已提交`)
+      await load()
+    }
   } catch (e) {
     ElMessage.error(e.message)
   }
@@ -869,9 +872,13 @@ async function batch(accountIds, operation, label) {
 
 async function removeAccounts(accountIds, label) {
   try {
-    await api.post('/api/admin/upstream-accounts/delete', { account_ids: accountIds })
-    ElMessage.success(`${label}已提交`)
-    await load()
+    const data = await api.post('/api/admin/upstream-accounts/delete', { account_ids: accountIds })
+    // 上游删除是异步任务：有 progress_id 就轮询到真正完成，否则立刻刷新列表
+    if (data.progress_id) pollOperation(data.progress_id, `${label}完成`)
+    else {
+      ElMessage.success(`${label}已提交`)
+      await load()
+    }
   } catch (e) {
     ElMessage.error(e.message)
   }
